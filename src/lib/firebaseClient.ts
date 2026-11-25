@@ -52,11 +52,16 @@ const REQUIRED_ENV_KEYS = [
   'VITE_FIREBASE_APP_ID'
 ] as const;
 
-export function readFirebaseEnvConfig(): {
+export function readFirebaseEnvConfig(
+  envOverride?: Record<string, string | undefined>
+): {
   config: FirebaseEnvConfig;
   missingEnvKeys: string[];
 } {
-  const env = (import.meta as unknown as { env?: Record<string, string | undefined> }).env ?? {};
+  const env =
+    envOverride ??
+    (import.meta as unknown as { env?: Record<string, string | undefined> }).env ??
+    {};
   const missingEnvKeys = REQUIRED_ENV_KEYS.filter(
     (key) => !env[key] || env[key]!.trim().length === 0
   );
@@ -180,6 +185,30 @@ export interface FirebaseServicesHandle {
   refreshAppCheckStatus: () => Promise<AppCheckStatus>;
 }
 
+const APP_CHECK_TOKEN_TIMEOUT_MS = 5000;
+
+function getAppCheckTokenWithTimeout(
+  appCheckInstance: AppCheck,
+  timeoutMs = APP_CHECK_TOKEN_TIMEOUT_MS
+): Promise<Awaited<ReturnType<typeof getToken>>> {
+  let timerId: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timerId = setTimeout(() => {
+      reject(
+        new Error(
+          `Timed out after ${timeoutMs}ms waiting for App Check / reCAPTCHA script.`
+        )
+      );
+    }, timeoutMs);
+  });
+
+  return Promise.race([getToken(appCheckInstance, false), timeoutPromise]).finally(
+    () => {
+      if (timerId !== undefined) clearTimeout(timerId);
+    }
+  );
+}
+
 let cachedHandle: FirebaseServicesHandle | null = null;
 
 export function mapPolicyToSdkInferenceMode(mode: HybridPolicyMode): InferenceMode {
@@ -301,7 +330,7 @@ export async function initializeFirebaseServices(): Promise<FirebaseServicesHand
       return appCheckStatus;
     }
     try {
-      const tokenRes = await getToken(appCheck, false);
+      const tokenRes = await getAppCheckTokenWithTimeout(appCheck);
       appCheckStatus = {
         ...appCheckStatus,
         tokenVerified: Boolean(tokenRes.token),
@@ -322,12 +351,11 @@ export async function initializeFirebaseServices(): Promise<FirebaseServicesHand
             : 'App Check token check failed.'
       };
     }
+    if (cachedHandle) {
+      cachedHandle.status.appCheck = appCheckStatus;
+    }
     return appCheckStatus;
   };
-
-  if (appCheck) {
-    await refreshAppCheckStatus();
-  }
 
   cachedHandle = {
     app,
@@ -347,8 +375,41 @@ export async function initializeFirebaseServices(): Promise<FirebaseServicesHand
   return cachedHandle;
 }
 
-export function getUnconfiguredRuntimeStatus(): FirebaseRuntimeStatus {
-  const { config, missingEnvKeys } = readFirebaseEnvConfig();
+export function getInitialRuntimeStatus(
+  envOverride?: Record<string, string | undefined>
+): FirebaseRuntimeStatus {
+  const { config, missingEnvKeys } = readFirebaseEnvConfig(envOverride);
+  if (missingEnvKeys.length > 0) {
+    return getUnconfiguredRuntimeStatus(envOverride);
+  }
+
+  return {
+    configured: true,
+    projectId: config.firebaseOptions.projectId,
+    cloudModel: config.cloudModel,
+    appCheck: {
+      mode: config.recaptchaSiteKey
+        ? config.appCheckDebugToken
+          ? 'debug-token'
+          : config.appCheckProvider
+        : config.appCheckDebugToken
+          ? 'debug-token'
+          : 'unconfigured',
+      initialized: false,
+      limitedUseTokens: config.useLimitedUseAppCheckTokens,
+      tokenVerified: false,
+      note: config.recaptchaSiteKey
+        ? 'Initializing Firebase App Check...'
+        : 'App Check not configured. Set VITE_APPCHECK_RECAPTCHA_SITE_KEY or VITE_APPCHECK_DEBUG_TOKEN.'
+    },
+    missingEnvKeys: []
+  };
+}
+
+export function getUnconfiguredRuntimeStatus(
+  envOverride?: Record<string, string | undefined>
+): FirebaseRuntimeStatus {
+  const { config, missingEnvKeys } = readFirebaseEnvConfig(envOverride);
   return {
     configured: false,
     projectId: config.firebaseOptions.projectId,

@@ -4,6 +4,7 @@ import { RedactionDiff } from './components/RedactionDiff';
 import { TelemetryBar } from './components/TelemetryBar';
 import { SAMPLE_DOCUMENTS } from './data/sampleDocuments';
 import {
+  getInitialRuntimeStatus,
   getUnconfiguredRuntimeStatus,
   initializeFirebaseServices,
   type FirebaseServicesHandle
@@ -73,7 +74,7 @@ export function App() {
   const [firebaseHandle, setFirebaseHandle] =
     useState<FirebaseServicesHandle | null>(null);
   const [runtimeStatus, setRuntimeStatus] = useState<FirebaseRuntimeStatus>(() =>
-    getUnconfiguredRuntimeStatus()
+    getInitialRuntimeStatus()
   );
 
   const [report, setReport] = useState<HybridExecutionReport | null>(null);
@@ -108,7 +109,16 @@ export function App() {
       if (handle) {
         setFirebaseHandle(handle);
         setRuntimeStatus(handle.status);
+        void handle.refreshAppCheckStatus().then((updated) => {
+          if (active) {
+            setRuntimeStatus((prev) => ({
+              ...prev,
+              appCheck: updated
+            }));
+          }
+        });
       } else {
+        setRuntimeStatus(getUnconfiguredRuntimeStatus());
         setUseSimulatedSandbox(true);
       }
     });
