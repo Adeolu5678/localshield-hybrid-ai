@@ -11,7 +11,7 @@ Legal teams, founders, and engineers routinely paste sensitive MSAs, NDAs, DPAs,
 LocalShield solves this with a **three-stage zero-leakage hybrid pipeline**:
 
 1. **Stage 0 — Deterministic Local PII Vault (0 bytes leave browser):** Masks emails, phone numbers, SSNs, credit cards, IBANs, IPv4 addresses, street addresses, and API tokens (`sk-...`, `AIza...`, `ghp_...`) locally in-memory before any prompt is constructed.
-2. **Stage 1 — On-Device Triage (`InferenceMode.PREFER_ON_DEVICE`):** Uses Firebase AI Logic (`firebase/ai`) to run structured clause extraction and redline counter-proposals **on-device via Chrome's Gemini Nano Prompt API** when available, with automatic fallback to cloud Gemini (`gemini-2.5-flash`) when Gemini Nano is unavailable.
+2. **Stage 1 — On-Device Triage (`InferenceMode.PREFER_ON_DEVICE`):** Uses Firebase AI Logic (`firebase/ai`) to run structured clause extraction and redline counter-proposals **on-device via Chrome's Gemini Nano Prompt API** when available, with automatic fallback to cloud Gemini (`gemini-3-flash-preview`) when Gemini Nano is unavailable.
 3. **Stage 2 — App Check-Protected Cloud Escalation (PII-Redacted Only):** Optionally escalates the **PII-redacted** document to Cloud Gemini via `GoogleAIBackend` (guarded by **Firebase App Check**) for deep cross-clause contradiction detection and compliance gap synthesis. Blocked automatically in Air-Gapped (`ONLY_ON_DEVICE`) or offline mode.
 
 ## Architecture
@@ -53,7 +53,7 @@ Fill in your Firebase Web App config from **Firebase Console -> Project Settings
 - `VITE_FIREBASE_STORAGE_BUCKET`
 - `VITE_FIREBASE_MESSAGING_SENDER_ID`
 - `VITE_FIREBASE_APP_ID`
-- `VITE_FIREBASE_CLOUD_MODEL=gemini-2.5-flash`
+- `VITE_FIREBASE_CLOUD_MODEL=gemini-3-flash-preview`
 
 > **No `.env` yet?** The app runs out-of-the-box in clearly labeled **Sandbox Mode** using the local deterministic PII vault and analyzer so you can inspect the telemetry state machine immediately.
 

@@ -12,7 +12,7 @@ import {
   probeChromeNanoAvailability,
   runHybridDocumentAnalysis
 } from './lib/hybridRouter';
-import { redactSensitiveData } from './lib/piiRedactor';
+import { estimateTokenCount, redactSensitiveData } from './lib/piiRedactor';
 import type {
   ChromeNanoAvailability,
   FirebaseRuntimeStatus,
@@ -57,6 +57,7 @@ function formatBriefMarkdown(report: HybridExecutionReport): string {
 export function App() {
   const [documentText, setDocumentText] = useState(SAMPLE_DOCUMENTS[0].content);
   const [selectedSampleId, setSelectedSampleId] = useState(SAMPLE_DOCUMENTS[0].id);
+  const [leftTab, setLeftTab] = useState<'source' | 'vault'>('source');
   const [policyMode, setPolicyMode] =
     useState<HybridPolicyMode>('prefer_on_device');
   const [runCloudEscalation, setRunCloudEscalation] = useState(true);
@@ -83,6 +84,11 @@ export function App() {
   const liveRedaction = useMemo(
     () => redactSensitiveData(documentText),
     [documentText]
+  );
+
+  const estimatedDocTokens = useMemo(
+    () => estimateTokenCount(liveRedaction.redactedText),
+    [liveRedaction.redactedText]
   );
 
   useEffect(() => {
@@ -164,11 +170,16 @@ export function App() {
     }));
   };
 
-  const handleAnalyze = async () => {
+  const runAnalysis = async (forceSandboxOverride?: boolean) => {
     if (!documentText.trim()) {
       setErrorMessage('Paste or upload a contract, policy, or technical document first.');
       return;
     }
+    const effectiveSandbox =
+      typeof forceSandboxOverride === 'boolean'
+        ? forceSandboxOverride
+        : !firebaseHandle || useSimulatedSandbox;
+
     setIsAnalyzing(true);
     setErrorMessage(null);
 
@@ -178,7 +189,7 @@ export function App() {
         runCloudEscalation,
         isOnline,
         chromeNanoAvailability: chromeAvailability,
-        useSimulatedSandbox: !firebaseHandle || useSimulatedSandbox,
+        useSimulatedSandbox: effectiveSandbox,
         cloudModelName: runtimeStatus.cloudModel,
         modelFactory: firebaseHandle
           ? (mode) => firebaseHandle.getHybridModel(mode)
@@ -192,6 +203,11 @@ export function App() {
     } finally {
       setIsAnalyzing(false);
     }
+  };
+
+  const handleEnableSandboxAndRerun = () => {
+    setUseSimulatedSandbox(true);
+    void runAnalysis(true);
   };
 
   const handleExportBrief = async () => {
@@ -221,21 +237,32 @@ export function App() {
           <div className="brand-mark" aria-hidden="true">
             LS
           </div>
-          <div>
-            <h1>LocalShield — HybridDoc Brief</h1>
+          <div className="brand-copy">
+            <div className="brand-title-row">
+              <h1>LocalShield</h1>
+              <span className="brand-divider" aria-hidden="true">/</span>
+              <span className="brand-product">HybridDoc Brief</span>
+            </div>
             <p className="subtitle">
-              Zero-Leakage On-Device Contract &amp; Policy Triage via Firebase AI
-              Logic + Chrome Gemini Nano
+              Zero-Leakage Contract &amp; Policy Intelligence via Firebase AI Logic + Gemini Nano
             </p>
           </div>
         </div>
         <div className="top-actions">
           <span
-            className={`env-pill ${runtimeStatus.configured ? 'env-live' : 'env-sandbox'}`}
+            className={`env-pill ${
+              useSimulatedSandbox
+                ? 'env-sandbox'
+                : runtimeStatus.configured
+                  ? 'env-live'
+                  : 'env-sandbox'
+            }`}
           >
-            {runtimeStatus.configured
-              ? `Firebase: ${runtimeStatus.projectId}`
-              : 'Sandbox Mode (.env unconfigured)'}
+            {useSimulatedSandbox
+              ? 'Sandbox Mode (Dry-Run)'
+              : runtimeStatus.configured
+                ? `Firebase: ${runtimeStatus.projectId}`
+                : 'Sandbox Mode (.env unconfigured)'}
           </span>
         </div>
       </header>
@@ -245,159 +272,239 @@ export function App() {
         downloadProgress={downloadProgress}
         isOnline={isOnline}
         firebaseConfigured={runtimeStatus.configured}
+        useSimulatedSandbox={useSimulatedSandbox}
         appCheck={runtimeStatus.appCheck}
         triageTelemetry={report?.triageTelemetry ?? null}
         escalationTelemetry={report?.escalationTelemetry ?? null}
+        cloudDegradation={report?.cloudDegradation}
         onWarmUpNano={handleWarmUpNano}
         onRefreshAppCheck={handleRefreshAppCheck}
+        onEnableSandbox={handleEnableSandboxAndRerun}
       />
 
-      <main className="workbench">
+      <main className={`workbench ${activeAnalysis ? 'workbench-active' : 'workbench-idle'}`}>
         <section className="pane pane-left">
-          <div className="panel-card">
-            <div className="panel-header-row">
-              <h2>1. Document &amp; Privacy Controls</h2>
-              <label className="upload-btn">
-                Load .txt / .md
-                <input
-                  type="file"
-                  accept=".txt,.md,.policy,.contract"
-                  onChange={handleFileUpload}
-                  hidden
-                />
-              </label>
-            </div>
-
-            <div className="sample-pills">
-              {SAMPLE_DOCUMENTS.map((doc) => (
-                <button
-                  key={doc.id}
-                  type="button"
-                  className={`sample-pill ${
-                    selectedSampleId === doc.id ? 'active' : ''
-                  }`}
-                  onClick={() => handleSampleSelect(doc.id)}
-                >
-                  <span className="pill-tag">{doc.tag}</span>
-                  <span>{doc.label}</span>
-                </button>
-              ))}
-            </div>
-
-            <textarea
-              className="doc-textarea mono"
-              rows={11}
-              value={documentText}
-              onChange={(e) => {
-                setDocumentText(e.target.value);
-                setSelectedSampleId('custom');
-              }}
-              placeholder="Paste a contract, privacy policy, SLA, or NDA here..."
-            />
-
-            <div className="controls-grid">
-              <label className="control-field">
-                <span>Firebase AI Logic InferenceMode</span>
-                <select
-                  value={policyMode}
-                  onChange={(e) =>
-                    setPolicyMode(e.target.value as HybridPolicyMode)
-                  }
-                >
-                  <option value="prefer_on_device">
-                    PREFER_ON_DEVICE (Nano first, Cloud fallback)
-                  </option>
-                  <option value="only_on_device">
-                    ONLY_ON_DEVICE (Strict Air-Gapped Vault)
-                  </option>
-                  <option value="prefer_in_cloud">
-                    PREFER_IN_CLOUD (Cloud first, Nano fallback)
-                  </option>
-                  <option value="only_in_cloud">
-                    ONLY_IN_CLOUD (App Check Protected Cloud)
-                  </option>
-                </select>
-              </label>
-
-              <label className="checkbox-field">
-                <input
-                  type="checkbox"
-                  checked={runCloudEscalation}
-                  disabled={policyMode === 'only_on_device'}
-                  onChange={(e) => setRunCloudEscalation(e.target.checked)}
-                />
-                <span>
-                  Stage 2: Escalate <strong>PII-redacted</strong> brief to Cloud
-                  Gemini for cross-clause synthesis
+          <div className="panel-card left-console-card">
+            <div className="console-tabs-bar" role="tablist" aria-label="Document workspace">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={leftTab === 'source'}
+                className={`console-tab ${leftTab === 'source' ? 'active' : ''}`}
+                onClick={() => setLeftTab('source')}
+              >
+                <span>1. Source Document</span>
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={leftTab === 'vault'}
+                className={`console-tab ${leftTab === 'vault' ? 'active' : ''}`}
+                onClick={() => setLeftTab('vault')}
+              >
+                <span>2. PII Redacted Vault</span>
+                <span className="tab-count-pill mono">
+                  {liveRedaction.totalMasked} masked
                 </span>
-              </label>
-
-              {runtimeStatus.configured && (
-                <label className="checkbox-field">
-                  <input
-                    type="checkbox"
-                    checked={useSimulatedSandbox}
-                    onChange={(e) => setUseSimulatedSandbox(e.target.checked)}
-                  />
-                  <span>
-                    Force Local Sandbox Simulation (dry-run without spending cloud
-                    quota)
-                  </span>
-                </label>
-              )}
+              </button>
             </div>
 
-            {errorMessage && (
-              <div className="error-banner" role="alert">
-                {errorMessage}
+            {leftTab === 'source' ? (
+              <div className="console-tab-body">
+                <div className="panel-header-row">
+                  <div className="doc-stats mono">
+                    <span>{documentText.length.toLocaleString()} chars</span>
+                    <span className="dot-sep" aria-hidden="true">·</span>
+                    <span>~{estimatedDocTokens} tok</span>
+                    <span className="dot-sep" aria-hidden="true">·</span>
+                    <span className="emerald-text">
+                      {liveRedaction.totalMasked} PII masked
+                    </span>
+                  </div>
+                  <label className="upload-btn">
+                    Load .txt / .md
+                    <input
+                      type="file"
+                      accept=".txt,.md,.policy,.contract"
+                      onChange={handleFileUpload}
+                      hidden
+                    />
+                  </label>
+                </div>
+
+                <div className="sample-pills">
+                  {SAMPLE_DOCUMENTS.map((doc) => (
+                    <button
+                      key={doc.id}
+                      type="button"
+                      className={`sample-pill ${
+                        selectedSampleId === doc.id ? 'active' : ''
+                      }`}
+                      onClick={() => handleSampleSelect(doc.id)}
+                    >
+                      <span className="pill-tag">{doc.tag}</span>
+                      <span>{doc.label}</span>
+                    </button>
+                  ))}
+                </div>
+
+                <textarea
+                  className="doc-textarea mono"
+                  rows={11}
+                  value={documentText}
+                  onChange={(e) => {
+                    setDocumentText(e.target.value);
+                    setSelectedSampleId('custom');
+                  }}
+                  placeholder="Paste a contract, privacy policy, SLA, or NDA here..."
+                />
+
+                <div className="controls-grid">
+                  <label className="control-field">
+                    <span>Firebase AI Logic InferenceMode</span>
+                    <select
+                      value={policyMode}
+                      onChange={(e) =>
+                        setPolicyMode(e.target.value as HybridPolicyMode)
+                      }
+                    >
+                      <option value="prefer_on_device">
+                        PREFER_ON_DEVICE (Nano first, Cloud fallback)
+                      </option>
+                      <option value="only_on_device">
+                        ONLY_ON_DEVICE (Strict Air-Gapped Vault)
+                      </option>
+                      <option value="prefer_in_cloud">
+                        PREFER_IN_CLOUD (Cloud first, Nano fallback)
+                      </option>
+                      <option value="only_in_cloud">
+                        ONLY_IN_CLOUD (App Check Protected Cloud)
+                      </option>
+                    </select>
+                  </label>
+
+                  <label className="checkbox-field">
+                    <input
+                      type="checkbox"
+                      checked={runCloudEscalation}
+                      disabled={policyMode === 'only_on_device'}
+                      onChange={(e) => setRunCloudEscalation(e.target.checked)}
+                    />
+                    <span>
+                      Stage 2: Escalate <strong>PII-redacted</strong> brief to Cloud
+                      Gemini for cross-clause synthesis
+                    </span>
+                  </label>
+
+                  {runtimeStatus.configured && (
+                    <label className="checkbox-field">
+                      <input
+                        type="checkbox"
+                        checked={useSimulatedSandbox}
+                        onChange={(e) => setUseSimulatedSandbox(e.target.checked)}
+                      />
+                      <span>
+                        Force Local Sandbox Simulation (dry-run without spending cloud
+                        quota)
+                      </span>
+                    </label>
+                  )}
+                </div>
+
+                {errorMessage && (
+                  <div className="error-banner" role="alert">
+                    {errorMessage}
+                  </div>
+                )}
+
+                <button
+                  type="button"
+                  className="btn-primary"
+                  onClick={() => void runAnalysis()}
+                  disabled={isAnalyzing}
+                >
+                  {isAnalyzing
+                    ? 'Running Hybrid Pipeline...'
+                    : 'Analyze Document with Hybrid AI'}
+                </button>
+              </div>
+            ) : (
+              <div className="console-tab-body">
+                <RedactionDiff redaction={liveRedaction} />
               </div>
             )}
-
-            <button
-              type="button"
-              className="btn-primary"
-              onClick={handleAnalyze}
-              disabled={isAnalyzing}
-            >
-              {isAnalyzing
-                ? 'Running Hybrid Pipeline...'
-                : 'Analyze Document with Hybrid AI'}
-            </button>
-          </div>
-
-          <div className="panel-card">
-            <RedactionDiff redaction={liveRedaction} />
           </div>
         </section>
 
         <section className="pane pane-right">
           {!activeAnalysis ? (
             <div className="empty-state panel-card">
-              <h2>Ready for Zero-Leakage Hybrid Analysis</h2>
-              <p>
-                LocalShield masks emails, tax IDs, cards, IBANs, IPs, addresses,
-                and API secrets <strong>100% locally</strong> before running{' '}
-                <code>InferenceMode.PREFER_ON_DEVICE</code> triage via Firebase AI
-                Logic.
-              </p>
-              <ul>
-                <li>
-                  <strong>Stage 1 (On-Device / Fallback):</strong> Clause extraction
-                  and redline generation with live <code>inferenceSource</code>{' '}
-                  telemetry.
-                </li>
-                <li>
-                  <strong>Stage 2 (PII-Redacted Cloud Escalation):</strong>{' '}
-                  Cross-clause contradiction detection protected by Firebase App
-                  Check.
-                </li>
-              </ul>
+              <div className="empty-header">
+                <span className="status-pill pill-emerald">READY FOR TRIAGE</span>
+                <h2>Zero-Leakage Hybrid Intelligence Console</h2>
+                <p>
+                  LocalShield masks emails, tax IDs, cards, IBANs, IPs, addresses,
+                  and API secrets <strong>100% locally</strong> before running{' '}
+                  <code>InferenceMode.PREFER_ON_DEVICE</code> via Firebase AI Logic.
+                </p>
+              </div>
+
+              <div className="pipeline-steps">
+                <div className="pipeline-step">
+                  <span className="step-num mono">00</span>
+                  <div>
+                    <strong>Deterministic Local PII Vault</strong>
+                    <p>
+                      {liveRedaction.totalMasked} sensitive entity token(s) currently
+                      masked in-browser. Raw values never leave this tab.
+                    </p>
+                  </div>
+                </div>
+                <div className="pipeline-step">
+                  <span className="step-num mono">01</span>
+                  <div>
+                    <strong>Stage 1 · On-Device Triage / Graceful Fallback</strong>
+                    <p>
+                      Runs Gemini Nano when available, falling back seamlessly to
+                      Cloud Gemini or Local Heuristic without blocking the brief.
+                    </p>
+                  </div>
+                </div>
+                <div className="pipeline-step">
+                  <span className="step-num mono">02</span>
+                  <div>
+                    <strong>Stage 2 · Redacted Cloud Escalation</strong>
+                    <p>
+                      Cross-clause contradiction detection and negotiation moves
+                      guarded by Firebase App Check and air-gap policy locks.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="empty-actions">
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => setLeftTab('vault')}
+                >
+                  Inspect Redacted Vault ({liveRedaction.totalMasked})
+                </button>
+                <button
+                  type="button"
+                  className="btn-primary btn-compact"
+                  onClick={() => void runAnalysis()}
+                  disabled={isAnalyzing}
+                >
+                  {isAnalyzing ? 'Analyzing...' : 'Run Hybrid Analysis'}
+                </button>
+              </div>
             </div>
           ) : (
             <>
               <div className="panel-card summary-card">
                 <div className="summary-top">
-                  <div>
+                  <div className="summary-main">
                     <span className="telemetry-label">
                       {activeAnalysis.documentType}
                     </span>
@@ -406,8 +513,10 @@ export function App() {
                       {activeAnalysis.executiveSummary}
                     </p>
                   </div>
-                  <div className="score-ring">
-                    <span className="score-num">
+                  <div
+                    className={`score-ring score-${activeAnalysis.riskPosture.toLowerCase()}`}
+                  >
+                    <span className="score-num tabular">
                       {activeAnalysis.overallRiskScore}
                     </span>
                     <span className="score-den">/ 100</span>
@@ -425,9 +534,28 @@ export function App() {
                 )}
 
                 {report?.escalationBlockedReason && (
-                  <div className="info-banner">
-                    <strong>Stage 2 Cloud Escalation Guard:</strong>{' '}
-                    {report.escalationBlockedReason}
+                  <div
+                    className={`info-banner ${
+                      report.cloudDegradation ? 'info-banner-warn' : ''
+                    }`}
+                  >
+                    <div>
+                      <strong>
+                        {report.cloudDegradation
+                          ? 'Cloud Escalation Guard (Degraded Locally):'
+                          : 'Stage 2 Cloud Escalation Guard:'}
+                      </strong>{' '}
+                      {report.escalationBlockedReason}
+                    </div>
+                    {report.cloudDegradation && !useSimulatedSandbox && (
+                      <button
+                        type="button"
+                        className="btn-inline btn-inline-accent"
+                        onClick={handleEnableSandboxAndRerun}
+                      >
+                        Run in Sandbox Simulation
+                      </button>
+                    )}
                   </div>
                 )}
 

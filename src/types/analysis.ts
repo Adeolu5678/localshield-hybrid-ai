@@ -20,6 +20,7 @@ export type ChromeNanoAvailability =
   | 'unsupported';
 
 export type AppCheckMode =
+  | 'recaptcha-enterprise'
   | 'recaptcha-v3'
   | 'debug-token'
   | 'unconfigured'
@@ -116,6 +117,16 @@ export interface RunTelemetry {
   timestamp: string;
 }
 
+export type CloudErrorKind = 'app_check_401' | 'network_or_api' | 'unknown';
+
+export interface CloudDegradationInfo {
+  kind: CloudErrorKind;
+  stage: 'triage' | 'escalation';
+  summary: string;
+  actionHint: string;
+  rawMessage: string;
+}
+
 export interface HybridExecutionReport {
   redaction: RedactionResult;
   triage: DocumentAnalysisResult;
@@ -123,4 +134,5 @@ export interface HybridExecutionReport {
   triageTelemetry: RunTelemetry;
   escalationTelemetry: RunTelemetry | null;
   escalationBlockedReason?: string;
+  cloudDegradation?: CloudDegradationInfo;
 }

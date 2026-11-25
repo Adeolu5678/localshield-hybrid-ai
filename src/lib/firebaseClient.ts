@@ -8,6 +8,7 @@ import {
 import {
   getToken,
   initializeAppCheck,
+  ReCaptchaEnterpriseProvider,
   ReCaptchaV3Provider,
   type AppCheck
 } from 'firebase/app-check';
@@ -34,10 +35,13 @@ declare global {
   }
 }
 
+export type AppCheckProviderKind = 'recaptcha-enterprise' | 'recaptcha-v3';
+
 export interface FirebaseEnvConfig {
   firebaseOptions: FirebaseOptions;
   cloudModel: string;
   appCheckDebugToken: string;
+  appCheckProvider: AppCheckProviderKind;
   recaptchaSiteKey: string;
   useLimitedUseAppCheckTokens: boolean;
 }
@@ -69,8 +73,12 @@ export function readFirebaseEnvConfig(): {
   return {
     config: {
       firebaseOptions,
-      cloudModel: env.VITE_FIREBASE_CLOUD_MODEL?.trim() || 'gemini-2.5-flash',
+      cloudModel: env.VITE_FIREBASE_CLOUD_MODEL?.trim() || 'gemini-3-flash-preview',
       appCheckDebugToken: env.VITE_APPCHECK_DEBUG_TOKEN?.trim() || '',
+      appCheckProvider:
+        env.VITE_APPCHECK_PROVIDER?.trim() === 'recaptcha-v3'
+          ? 'recaptcha-v3'
+          : 'recaptcha-enterprise',
       recaptchaSiteKey: env.VITE_APPCHECK_RECAPTCHA_SITE_KEY?.trim() || '',
       useLimitedUseAppCheckTokens: env.VITE_APPCHECK_LIMITED_USE === 'true'
     },
@@ -213,18 +221,24 @@ export async function initializeFirebaseServices(): Promise<FirebaseServicesHand
 
   if (config.recaptchaSiteKey) {
     try {
+      const provider =
+        config.appCheckProvider === 'recaptcha-v3'
+          ? new ReCaptchaV3Provider(config.recaptchaSiteKey)
+          : new ReCaptchaEnterpriseProvider(config.recaptchaSiteKey);
       appCheck = initializeAppCheck(app, {
-        provider: new ReCaptchaV3Provider(config.recaptchaSiteKey),
+        provider,
         isTokenAutoRefreshEnabled: true
       });
       appCheckStatus = {
-        mode: config.appCheckDebugToken ? 'debug-token' : 'recaptcha-v3',
+        mode: config.appCheckDebugToken ? 'debug-token' : config.appCheckProvider,
         initialized: true,
         limitedUseTokens: config.useLimitedUseAppCheckTokens,
         tokenVerified: false,
         note: config.appCheckDebugToken
           ? 'App Check active with debug token mode enabled.'
-          : 'App Check active with reCAPTCHA v3 provider.'
+          : config.appCheckProvider === 'recaptcha-enterprise'
+            ? 'App Check active with reCAPTCHA Enterprise provider.'
+            : 'App Check active with reCAPTCHA v3 provider.'
       };
     } catch (err) {
       appCheckStatus = {
@@ -241,7 +255,7 @@ export async function initializeFirebaseServices(): Promise<FirebaseServicesHand
       initialized: false,
       limitedUseTokens: config.useLimitedUseAppCheckTokens,
       tokenVerified: false,
-      note: 'Debug token flag set, waiting for VITE_APPCHECK_RECAPTCHA_SITE_KEY to initialize App Check provider.'
+      note: 'Debug token flag is set, but VITE_APPCHECK_RECAPTCHA_SITE_KEY is empty in .env.'
     };
   }
 
@@ -274,7 +288,18 @@ export async function initializeFirebaseServices(): Promise<FirebaseServicesHand
   };
 
   const refreshAppCheckStatus = async (): Promise<AppCheckStatus> => {
-    if (!appCheck) return appCheckStatus;
+    const checkedAt = new Date().toISOString();
+    if (!appCheck) {
+      appCheckStatus = {
+        ...appCheckStatus,
+        tokenVerified: false,
+        lastCheckedAt: checkedAt,
+        note: config.appCheckDebugToken && !config.recaptchaSiteKey
+          ? 'No token minted: add VITE_APPCHECK_RECAPTCHA_SITE_KEY in .env to exchange your debug token.'
+          : 'No token minted: App Check provider is unconfigured. Set VITE_APPCHECK_RECAPTCHA_SITE_KEY in .env.'
+      };
+      return appCheckStatus;
+    }
     try {
       const tokenRes = await getToken(appCheck, false);
       appCheckStatus = {
@@ -283,14 +308,14 @@ export async function initializeFirebaseServices(): Promise<FirebaseServicesHand
         tokenPreview: tokenRes.token
           ? `${tokenRes.token.slice(0, 12)}...${tokenRes.token.slice(-6)}`
           : undefined,
-        lastCheckedAt: new Date().toISOString(),
+        lastCheckedAt: checkedAt,
         note: 'App Check token verified for Firebase AI Logic cloud requests.'
       };
     } catch (err) {
       appCheckStatus = {
         ...appCheckStatus,
         tokenVerified: false,
-        lastCheckedAt: new Date().toISOString(),
+        lastCheckedAt: checkedAt,
         note:
           err instanceof Error
             ? `App Check token check failed: ${err.message}`

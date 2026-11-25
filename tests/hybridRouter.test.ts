@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  classifyCloudError,
   probeChromeNanoAvailability,
   runHybridDocumentAnalysis,
   type HybridModelRunner
@@ -70,7 +71,7 @@ describe('runHybridDocumentAnalysis', () => {
       isOnline: false,
       chromeNanoAvailability: 'available',
       useSimulatedSandbox: false,
-      cloudModelName: 'gemini-2.5-flash',
+      cloudModelName: 'gemini-3-flash-preview',
       modelFactory: () => mockModel
     });
 
@@ -111,7 +112,7 @@ describe('runHybridDocumentAnalysis', () => {
       isOnline: true,
       chromeNanoAvailability: 'unavailable',
       useSimulatedSandbox: false,
-      cloudModelName: 'gemini-2.5-flash',
+      cloudModelName: 'gemini-3-flash-preview',
       modelFactory: () => mockModel
     });
 
@@ -144,7 +145,7 @@ describe('runHybridDocumentAnalysis', () => {
       isOnline: true,
       chromeNanoAvailability: 'available',
       useSimulatedSandbox: false,
-      cloudModelName: 'gemini-2.5-flash',
+      cloudModelName: 'gemini-3-flash-preview',
       modelFactory: (mode) => {
         factoryCalls.push(mode);
         return mockModel;
@@ -173,7 +174,7 @@ describe('runHybridDocumentAnalysis', () => {
       isOnline: false,
       chromeNanoAvailability: 'available',
       useSimulatedSandbox: false,
-      cloudModelName: 'gemini-2.5-flash',
+      cloudModelName: 'gemini-3-flash-preview',
       modelFactory: () => mockModel
     });
 
@@ -188,12 +189,88 @@ describe('runHybridDocumentAnalysis', () => {
       isOnline: true,
       chromeNanoAvailability: 'unsupported',
       useSimulatedSandbox: true,
-      cloudModelName: 'gemini-2.5-flash'
+      cloudModelName: 'gemini-3-flash-preview'
     });
 
     expect(report.triageTelemetry.badge).toBe('SIMULATED ON-DEVICE');
     expect(report.escalationTelemetry?.badge).toBe('SIMULATED CLOUD');
     expect(report.triage.clauses.length).toBeGreaterThanOrEqual(4);
     expect(report.escalation?.crossClauseFindings.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('degrades gracefully when Stage 1 and Stage 2 fail with 401 Firebase App Check error', async () => {
+    const failingModel: HybridModelRunner = {
+      generateContent: vi.fn(async () => {
+        throw new Error(
+          'AI/fetch-error: Error fetching from https://firebasevertexai.googleapis.com: [401] Firebase App Check token is invalid.'
+        );
+      })
+    };
+
+    const report = await runHybridDocumentAnalysis(SAMPLE_DOCUMENTS[0].content, {
+      policyMode: 'prefer_on_device',
+      runCloudEscalation: true,
+      isOnline: true,
+      chromeNanoAvailability: 'unsupported',
+      useSimulatedSandbox: false,
+      cloudModelName: 'gemini-3-flash-preview',
+      modelFactory: () => failingModel
+    });
+
+    expect(report.triageTelemetry.badge).toBe('LOCAL HEURISTIC');
+    expect(report.triageTelemetry.inferenceSource).toBe('local_heuristic');
+    expect(report.triageTelemetry.fallbackReason).toContain('401 Firebase App Check');
+    expect(report.triage.clauses.length).toBeGreaterThanOrEqual(4);
+    expect(report.triage.crossClauseFindings.length).toBeGreaterThanOrEqual(1);
+    expect(report.cloudDegradation?.kind).toBe('app_check_401');
+    expect(report.escalationBlockedReason).toContain('401 Firebase App Check');
+  });
+
+  it('preserves on-device Stage 1 result and falls back locally when Stage 2 cloud escalation throws 401', async () => {
+    const onDeviceModel: HybridModelRunner = {
+      generateContent: vi.fn(async () => ({
+        response: {
+          text: () => VALID_JSON_RESPONSE,
+          inferenceSource: 'on_device' as const
+        }
+      }))
+    };
+    const failingCloudModel: HybridModelRunner = {
+      generateContent: vi.fn(async () => {
+        throw new Error('401 Firebase App Check token is invalid.');
+      })
+    };
+
+    const report = await runHybridDocumentAnalysis(SAMPLE_DOCUMENTS[0].content, {
+      policyMode: 'prefer_on_device',
+      runCloudEscalation: true,
+      isOnline: true,
+      chromeNanoAvailability: 'available',
+      useSimulatedSandbox: false,
+      cloudModelName: 'gemini-3-flash-preview',
+      modelFactory: (mode) =>
+        mode === 'only_in_cloud' ? failingCloudModel : onDeviceModel
+    });
+
+    expect(report.triageTelemetry.badge).toBe('ON-DEVICE');
+    expect(report.escalationTelemetry?.badge).toBe('LOCAL HEURISTIC');
+    expect(report.escalation?.crossClauseFindings.length).toBeGreaterThanOrEqual(1);
+    expect(report.cloudDegradation?.kind).toBe('app_check_401');
+    expect(report.cloudDegradation?.stage).toBe('escalation');
+  });
+
+  it('classifies App Check 401 and network errors clearly', () => {
+    const appCheckErr = classifyCloudError(
+      new Error('AI/fetch-error: 401 Firebase App Check token is invalid'),
+      'triage'
+    );
+    expect(appCheckErr.kind).toBe('app_check_401');
+    expect(appCheckErr.actionHint).toContain('VITE_APPCHECK_RECAPTCHA_SITE_KEY');
+
+    const netErr = classifyCloudError(
+      new Error('AI/fetch-error: Failed to fetch'),
+      'escalation'
+    );
+    expect(netErr.kind).toBe('network_or_api');
   });
 });

@@ -6,6 +6,8 @@ import {
 import { estimateTokenCount, redactSensitiveData } from './piiRedactor';
 import type {
   ChromeNanoAvailability,
+  CloudDegradationInfo,
+  CloudErrorKind,
   DocumentAnalysisResult,
   HybridExecutionReport,
   HybridPolicyMode,
@@ -164,6 +166,61 @@ function buildSimulatedCloudEscalation(
   };
 }
 
+export function classifyCloudError(
+  err: unknown,
+  stage: 'triage' | 'escalation'
+): CloudDegradationInfo {
+  const rawMessage = err instanceof Error ? err.message : String(err);
+  let kind: CloudErrorKind = 'unknown';
+
+  if (
+    /app\s*check|401|unauthenticated|invalid.*token|token.*invalid/i.test(
+      rawMessage
+    )
+  ) {
+    kind = 'app_check_401';
+  } else if (
+    /fetch-error|failed to fetch|network|enotfound|econnrefused|timeout|403|429|5\d\d/i.test(
+      rawMessage
+    )
+  ) {
+    kind = 'network_or_api';
+  }
+
+  if (kind === 'app_check_401') {
+    return {
+      kind,
+      stage,
+      summary:
+        'Cloud Gemini rejected the request (401 Firebase App Check token missing or invalid).',
+      actionHint:
+        'Set VITE_APPCHECK_RECAPTCHA_SITE_KEY (and register your debug token in Firebase Console) or switch to Sandbox Simulation.',
+      rawMessage
+    };
+  }
+
+  if (kind === 'network_or_api') {
+    return {
+      kind,
+      stage,
+      summary:
+        'Cloud Gemini endpoint was unreachable or returned an API fetch error.',
+      actionHint:
+        'Verify network connectivity and Firebase AI Logic enablement, or run in Sandbox Simulation.',
+      rawMessage
+    };
+  }
+
+  return {
+    kind,
+    stage,
+    summary: `Cloud Gemini ${stage} call failed (${rawMessage}).`,
+    actionHint:
+      'Review Firebase configuration or switch to Local Heuristic / Sandbox Simulation.',
+    rawMessage
+  };
+}
+
 /**
  * Executes the 2-stage Hybrid Inference pipeline:
  * 0. Local deterministic PII redaction (always runs first, 0 bytes leave browser)
@@ -180,6 +237,7 @@ export async function runHybridDocumentAnalysis(
 
   let triage: DocumentAnalysisResult;
   let triageTelemetry: RunTelemetry;
+  let cloudDegradation: CloudDegradationInfo | undefined;
 
   const triageStart = now();
 
@@ -219,6 +277,7 @@ export async function runHybridDocumentAnalysis(
       if (options.policyMode === 'only_on_device') {
         throw err;
       }
+      cloudDegradation = classifyCloudError(err, 'triage');
       triage = analyzeDocumentHeuristically(redaction.redactedText);
       const serialized = JSON.stringify(triage);
       triageTelemetry = {
@@ -230,10 +289,7 @@ export async function runHybridDocumentAnalysis(
         latencyMs: Math.max(1, Math.round(now() - triageStart)),
         ...extractTokenStats(triagePrompt, serialized),
         piiMaskedBeforeInference: redaction.totalMasked,
-        fallbackReason:
-          err instanceof Error
-            ? `Model call failed (${err.message}); fell back to offline deterministic analyzer.`
-            : 'Model call failed; fell back to offline deterministic analyzer.',
+        fallbackReason: `${cloudDegradation.summary} ${cloudDegradation.actionHint} Degraded cleanly to 100% in-browser heuristic triage.`,
         timestamp: new Date().toISOString()
       };
     }
@@ -313,21 +369,44 @@ export async function runHybridDocumentAnalysis(
     } else if (options.modelFactory && !options.useSimulatedSandbox) {
       const escStart = now();
       const escPrompt = buildEscalationPrompt(redaction.redactedText, triage);
-      const cloudModel = options.modelFactory('only_in_cloud');
-      const escRes = await cloudModel.generateContent(escPrompt);
-      const rawEsc = escRes.response.text();
-      escalation = parseStructuredAnalysis(rawEsc, redaction.redactedText);
-      escalationTelemetry = {
-        stage: 'escalation',
-        badge: 'CLOUD ESCALATION',
-        requestedMode: 'only_in_cloud',
-        inferenceSource: 'in_cloud',
-        modelName: options.cloudModelName,
-        latencyMs: Math.max(1, Math.round(now() - escStart)),
-        ...extractTokenStats(escPrompt, rawEsc, escRes.response.usageMetadata),
-        piiMaskedBeforeInference: redaction.totalMasked,
-        timestamp: new Date().toISOString()
-      };
+      try {
+        const cloudModel = options.modelFactory('only_in_cloud');
+        const escRes = await cloudModel.generateContent(escPrompt);
+        const rawEsc = escRes.response.text();
+        escalation = parseStructuredAnalysis(rawEsc, redaction.redactedText);
+        escalationTelemetry = {
+          stage: 'escalation',
+          badge: 'CLOUD ESCALATION',
+          requestedMode: 'only_in_cloud',
+          inferenceSource: 'in_cloud',
+          modelName: options.cloudModelName,
+          latencyMs: Math.max(1, Math.round(now() - escStart)),
+          ...extractTokenStats(escPrompt, rawEsc, escRes.response.usageMetadata),
+          piiMaskedBeforeInference: redaction.totalMasked,
+          timestamp: new Date().toISOString()
+        };
+      } catch (err) {
+        const escDegradation = classifyCloudError(err, 'escalation');
+        cloudDegradation = cloudDegradation ?? escDegradation;
+        escalationBlockedReason = `${escDegradation.summary} ${escDegradation.actionHint} Preserved local Stage 1 & deterministic cross-clause findings.`;
+
+        if (triageTelemetry.inferenceSource === 'on_device') {
+          escalation = buildSimulatedCloudEscalation(triage, redaction.redactedText);
+          const serialized = JSON.stringify(escalation);
+          escalationTelemetry = {
+            stage: 'escalation',
+            badge: 'LOCAL HEURISTIC',
+            requestedMode: 'only_in_cloud',
+            inferenceSource: 'local_heuristic',
+            modelName: 'Local Cross-Clause Fallback',
+            latencyMs: Math.max(1, Math.round(now() - escStart)),
+            ...extractTokenStats(escPrompt, serialized),
+            piiMaskedBeforeInference: redaction.totalMasked,
+            fallbackReason: escDegradation.summary,
+            timestamp: new Date().toISOString()
+          };
+        }
+      }
     } else if (options.useSimulatedSandbox) {
       const escStart = now();
       const escPrompt = buildEscalationPrompt(redaction.redactedText, triage);
@@ -356,6 +435,7 @@ export async function runHybridDocumentAnalysis(
     escalation,
     triageTelemetry,
     escalationTelemetry,
-    escalationBlockedReason
+    escalationBlockedReason,
+    cloudDegradation
   };
 }
