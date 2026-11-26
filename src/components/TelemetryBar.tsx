@@ -1,24 +1,42 @@
+import { useState } from 'react';
 import type {
   AppCheckStatus,
   ChromeNanoAvailability,
   CloudDegradationInfo,
-  RunTelemetry
+  RunTelemetry,
+  SemanticPiiReport
 } from '../types/analysis';
 
 interface TelemetryBarProps {
   chromeAvailability: ChromeNanoAvailability;
   downloadProgress: number | null;
+  isReprobingNano?: boolean;
   isOnline: boolean;
   firebaseConfigured: boolean;
   useSimulatedSandbox: boolean;
   appCheck: AppCheckStatus;
   triageTelemetry: RunTelemetry | null;
   escalationTelemetry: RunTelemetry | null;
+  semanticPii?: SemanticPiiReport;
   cloudDegradation?: CloudDegradationInfo;
   onWarmUpNano: () => void;
+  onReprobeNano: () => void;
   onRefreshAppCheck: () => void;
   onEnableSandbox: () => void;
 }
+
+const CHROME_NANO_FLAGS = [
+  {
+    id: 'opt-guide',
+    flag: 'chrome://flags/#optimization-guide-on-device-model',
+    setting: 'Enabled BypassPerfRequirement'
+  },
+  {
+    id: 'prompt-api',
+    flag: 'chrome://flags/#prompt-api-for-gemini-nano',
+    setting: 'Enabled'
+  }
+] as const;
 
 function getBadgeClass(badge: RunTelemetry['badge']): string {
   switch (badge) {
@@ -70,19 +88,77 @@ function getAppCheckLabel(
 export function TelemetryBar({
   chromeAvailability,
   downloadProgress,
+  isReprobingNano = false,
   isOnline,
   firebaseConfigured,
   useSimulatedSandbox,
   appCheck,
   triageTelemetry,
   escalationTelemetry,
+  semanticPii,
   cloudDegradation,
   onWarmUpNano,
+  onReprobeNano,
   onRefreshAppCheck,
   onEnableSandbox
 }: TelemetryBarProps) {
+  const [nanoDrawerOpen, setNanoDrawerOpen] = useState(false);
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+
   const activeTelemetry = escalationTelemetry ?? triageTelemetry;
   const appCheckBadge = getAppCheckLabel(firebaseConfigured, appCheck);
+  const showNanoSetupControls =
+    chromeAvailability === 'unsupported' ||
+    chromeAvailability === 'unavailable';
+
+  const hasBothStages = Boolean(triageTelemetry && escalationTelemetry);
+  const combinedLatencyMs =
+    (triageTelemetry?.latencyMs ?? 0) + (escalationTelemetry?.latencyMs ?? 0);
+  const combinedTokens =
+    (triageTelemetry?.totalTokens ?? 0) +
+    (escalationTelemetry?.totalTokens ?? 0);
+
+  const tokenSourceLabel = (() => {
+    if (!triageTelemetry) return '';
+    if (!escalationTelemetry) {
+      return triageTelemetry.tokenCountSource === 'usage_metadata'
+        ? 'exact'
+        : 'est';
+    }
+    if (
+      triageTelemetry.tokenCountSource === 'usage_metadata' &&
+      escalationTelemetry.tokenCountSource === 'usage_metadata'
+    ) {
+      return 'exact';
+    }
+    if (
+      triageTelemetry.tokenCountSource === 'estimated' &&
+      escalationTelemetry.tokenCountSource === 'estimated'
+    ) {
+      return 'est';
+    }
+    return 'mixed';
+  })();
+
+  const formatLatency = (ms: number): string =>
+    ms >= 1000 ? `${(ms / 1000).toFixed(2)}s` : `${Math.round(ms)}ms`;
+
+  const combinedBreakdownTooltip =
+    triageTelemetry && escalationTelemetry
+      ? `Stage 1 (${triageTelemetry.badge}): ${formatLatency(triageTelemetry.latencyMs)} / ${triageTelemetry.totalTokens} tok · Stage 2 (${escalationTelemetry.badge}): ${formatLatency(escalationTelemetry.latencyMs)} / ${escalationTelemetry.totalTokens} tok`
+      : undefined;
+
+  const handleCopyFlag = async (key: string, value: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopiedKey(key);
+      setTimeout(() => {
+        setCopiedKey((prev) => (prev === key ? null : prev));
+      }, 1600);
+    } catch {
+      // Clipboard blocked in restricted context; ignore silently.
+    }
+  };
 
   return (
     <section className="telemetry-bar" aria-label="Hybrid Inference Telemetry">
@@ -146,6 +222,28 @@ export function TelemetryBar({
                   : 'Warm Up Nano'}
               </button>
             )}
+            {showNanoSetupControls && (
+              <>
+                <button
+                  type="button"
+                  className={`btn-inline ${
+                    nanoDrawerOpen ? 'btn-inline-emerald' : 'btn-inline-accent'
+                  }`}
+                  aria-expanded={nanoDrawerOpen}
+                  onClick={() => setNanoDrawerOpen((prev) => !prev)}
+                >
+                  {nanoDrawerOpen ? 'Hide Setup Guide' : 'Enable Gemini Nano'}
+                </button>
+                <button
+                  type="button"
+                  className="btn-inline"
+                  onClick={onReprobeNano}
+                  disabled={isReprobingNano}
+                >
+                  {isReprobingNano ? 'Probing...' : 'Re-probe Nano'}
+                </button>
+              </>
+            )}
           </div>
           <p className="telemetry-sub">
             {chromeAvailability === 'available'
@@ -200,28 +298,101 @@ export function TelemetryBar({
 
         <div className="telemetry-cell">
           <span className="telemetry-label">Latency &amp; Privacy</span>
-          <div className="telemetry-value-row mono tabular">
-            <strong>
-              {triageTelemetry ? `${triageTelemetry.latencyMs}ms` : '-- ms'}
-            </strong>
-            <span className="divider">/</span>
-            <span>
-              {triageTelemetry
-                ? `${triageTelemetry.totalTokens} tok (${
-                    triageTelemetry.tokenCountSource === 'usage_metadata'
-                      ? 'exact'
-                      : 'est'
-                  })`
-                : '-- tok'}
-            </span>
+          <div
+            className="telemetry-value-row mono tabular"
+            title={combinedBreakdownTooltip}
+          >
+            {triageTelemetry ? (
+              <>
+                <strong>{formatLatency(combinedLatencyMs)}</strong>
+                <span className="divider">/</span>
+                <span>{`${combinedTokens} tok (${tokenSourceLabel})`}</span>
+              </>
+            ) : (
+              <span className="muted-sm">Ready · Run a scan to measure</span>
+            )}
           </div>
+          {hasBothStages && triageTelemetry && escalationTelemetry && (
+            <p className="telemetry-breakdown mono tabular">
+              S1 {formatLatency(triageTelemetry.latencyMs)} ({triageTelemetry.totalTokens}t)
+              {' + '}S2 {formatLatency(escalationTelemetry.latencyMs)} (
+              {escalationTelemetry.totalTokens}t)
+            </p>
+          )}
           <p className="telemetry-sub">
             {triageTelemetry
               ? `${triageTelemetry.piiMaskedBeforeInference} PII entity token(s) masked locally`
               : 'Zero raw PII leaves browser'}
+            {semanticPii && semanticPii.status !== 'skipped'
+              ? ` · Stage 0.5 ${semanticPii.status} (+${semanticPii.entitiesAdded})`
+              : ''}
           </p>
         </div>
       </div>
+
+      {showNanoSetupControls && nanoDrawerOpen && (
+        <div
+          className="nano-setup-drawer"
+          role="region"
+          aria-label="Chrome Gemini Nano 30-second setup guide"
+        >
+          <div className="nano-setup-head">
+            <div>
+              <strong>Enable On-Device Chrome Gemini Nano (30s Setup)</strong>
+              <p className="muted-sm">
+                Paste each flag into Chrome 138+ (Desktop), relaunch Chrome,
+                then click <strong>Re-probe Nano</strong> without reloading.
+              </p>
+            </div>
+            <button
+              type="button"
+              className="btn-inline"
+              onClick={onReprobeNano}
+              disabled={isReprobingNano}
+            >
+              {isReprobingNano ? 'Probing...' : 'Re-probe Nano'}
+            </button>
+          </div>
+          <div className="nano-flags-list">
+            {CHROME_NANO_FLAGS.map((item) => (
+              <div key={item.id} className="nano-flag-row">
+                <div className="nano-flag-info">
+                  <code className="mono">{item.flag}</code>
+                  <span className="nano-flag-setting">
+                    Set to <strong>{item.setting}</strong>
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  className="btn-inline"
+                  onClick={() => void handleCopyFlag(item.id, item.flag)}
+                >
+                  {copiedKey === item.id ? 'Copied' : 'Copy Flag'}
+                </button>
+              </div>
+            ))}
+            <div className="nano-flag-row nano-flag-note">
+              <div className="nano-flag-info">
+                <code className="mono">chrome://components</code>
+                <span className="nano-flag-setting">
+                  Verify <strong>Optimization Guide On Device Model</strong> is
+                  downloaded (click &ldquo;Check for update&rdquo; if version is{' '}
+                  <code className="mono">0.0.0.0</code>).
+                </span>
+              </div>
+              <button
+                type="button"
+                className="btn-inline"
+                onClick={() =>
+                  void handleCopyFlag('components', 'chrome://components')
+                }
+              >
+                {copiedKey === 'components' ? 'Copied' : 'Copy URL'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {triageTelemetry?.fallbackReason && (
         <div

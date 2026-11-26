@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192" width="192" height="192" role="img" aria-label="LocalShield">
+  <rect width="192" height="192" rx="40" fill="#F8FAF9" />
+  <rect x="4" y="4" width="184" height="184" rx="36" fill="none" stroke="#E2E8F0" stroke-width="4" />
+  <path d="M96 28 L152 50 V94 C152 130 128 156 96 168 C64 156 40 130 40 94 V50 Z" fill="#0B4F3A" />
+  <path d="M96 28 L152 50 V94 C152 130 128 156 96 168 V28 Z" fill="#0F6B4E" />
+  <circle cx="96" cy="88" r="15" fill="#FFFFFF" />
+  <path d="M89.5 100 H102.5 L105.5 130 H86.5 L89.5 100 Z" fill="#FFFFFF" />
+</svg>

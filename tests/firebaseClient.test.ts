@@ -6,6 +6,10 @@ const mockAppCheck = { app: mockApp };
 
 const getTokenMock = vi.fn();
 const initializeAppCheckMock = vi.fn(() => mockAppCheck);
+const getGenerativeModelMock = vi.fn((_ai: unknown, params: unknown) => ({
+  params,
+  instanceId: Math.random()
+}));
 
 vi.mock('firebase/app', () => ({
   getApps: vi.fn(() => []),
@@ -22,7 +26,7 @@ vi.mock('firebase/app-check', () => ({
 
 vi.mock('firebase/ai', () => ({
   getAI: vi.fn(() => mockAi),
-  getGenerativeModel: vi.fn(() => ({})),
+  getGenerativeModel: getGenerativeModelMock,
   GoogleAIBackend: vi.fn(),
   InferenceMode: {
     PREFER_ON_DEVICE: 'prefer_on_device',
@@ -50,7 +54,7 @@ function stubValidFirebaseEnv() {
   vi.stubEnv('VITE_APPCHECK_LIMITED_USE', 'false');
 }
 
-describe('firebaseClient startup and App Check resilience', () => {
+describe('firebaseClient startup, model caching, and App Check resilience', () => {
   beforeEach(() => {
     vi.resetModules();
     vi.clearAllMocks();
@@ -106,6 +110,62 @@ describe('firebaseClient startup and App Check resilience', () => {
     expect(handle?.status.appCheck.initialized).toBe(true);
     expect(handle?.status.appCheck.mode).toBe('recaptcha-enterprise');
     expect(getTokenMock).not.toHaveBeenCalled();
+  });
+
+  it('caches GenerativeModel instances per (inferenceMode, schemaKey) and supports resetModelCache', async () => {
+    stubValidFirebaseEnv();
+    const { initializeFirebaseServices, resetModelCache } = await import(
+      '../src/lib/firebaseClient'
+    );
+    const handle = await initializeFirebaseServices();
+    expect(handle).not.toBeNull();
+
+    const m1 = handle!.getHybridModel('prefer_on_device', 'document_analysis');
+    const m2 = handle!.getHybridModel('prefer_on_device', 'document_analysis');
+    const m3 = handle!.getHybridModel('only_in_cloud', 'document_analysis');
+    const mSem = handle!.getHybridModel('prefer_on_device', 'semantic_pii');
+    const mChat = handle!.getHybridModel('prefer_on_device', 'negotiation_chat');
+
+    expect(m1).toBe(m2);
+    expect(m1).not.toBe(m3);
+    expect(m1).not.toBe(mSem);
+    expect(m1).not.toBe(mChat);
+    expect(getGenerativeModelMock).toHaveBeenCalledTimes(4);
+
+    // Semantic PII must always force ONLY_ON_DEVICE regardless of requested mode
+    const semCallParams = getGenerativeModelMock.mock.calls[2][1] as {
+      mode: string;
+    };
+    expect(semCallParams.mode).toBe('only_on_device');
+
+    resetModelCache();
+    const m1AfterReset = handle!.getHybridModel(
+      'prefer_on_device',
+      'document_analysis'
+    );
+    expect(m1AfterReset).not.toBe(m1);
+    expect(getGenerativeModelMock).toHaveBeenCalledTimes(5);
+  });
+
+  it('builds multimodal content parts when inlineAttachments are provided', async () => {
+    const { buildMultimodalContentParts } = await import(
+      '../src/lib/firebaseClient'
+    );
+
+    expect(buildMultimodalContentParts('hello')).toBe('hello');
+    expect(buildMultimodalContentParts('hello', [])).toBe('hello');
+
+    const parts = buildMultimodalContentParts('Analyze scan', [
+      { mimeType: 'image/png', data: 'BASE64_PNG', name: 'page1.png' }
+    ]);
+    expect(Array.isArray(parts)).toBe(true);
+    expect(parts).toEqual([
+      'Analyze scan',
+      {
+        type: 'inlineData',
+        inlineData: { mimeType: 'image/png', data: 'BASE64_PNG' }
+      }
+    ]);
   });
 
   it('times out refreshAppCheckStatus cleanly after 5s when getToken hangs', async () => {

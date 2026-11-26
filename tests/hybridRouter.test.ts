@@ -1,17 +1,43 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  chunkDocumentText,
   classifyCloudError,
+  computeHybridDelta,
+  createClauseNegotiator,
+  negotiateClauseTurn,
   probeChromeNanoAvailability,
   runHybridDocumentAnalysis,
   type HybridModelRunner
 } from '../src/lib/hybridRouter';
 import { SAMPLE_DOCUMENTS } from '../src/data/sampleDocuments';
+import type { DocumentAnalysisResult, PipelineStage } from '../src/types/analysis';
 
 const VALID_JSON_RESPONSE = JSON.stringify({
   documentType: 'SaaS MSA',
-  overallRiskScore: 88,
+  overallRiskScore: 76,
   riskPosture: 'Critical',
   executiveSummary: 'High liability and AI training risks detected.',
+  clauses: [
+    {
+      id: 'c-1',
+      title: 'Vendor $100 Liability Cap',
+      category: 'Liability',
+      severity: 'high',
+      excerpt: 'Vendor liability shall not exceed $100 USD.',
+      rationale: 'Leaves customer exposed for vendor outages and breaches.',
+      redlineProposal: 'Set mutual 12-month fee cap.'
+    }
+  ],
+  crossClauseFindings: [],
+  complianceFlags: ['GDPR Art. 33']
+});
+
+const ESCALATED_JSON_RESPONSE = JSON.stringify({
+  documentType: 'SaaS MSA',
+  overallRiskScore: 91,
+  riskPosture: 'Critical',
+  executiveSummary:
+    'Escalated cloud review upgraded liability cap to critical and found AI training trap.',
   clauses: [
     {
       id: 'c-1',
@@ -21,18 +47,29 @@ const VALID_JSON_RESPONSE = JSON.stringify({
       excerpt: 'Vendor liability shall not exceed $100 USD.',
       rationale: 'Leaves customer exposed for vendor outages and breaches.',
       redlineProposal: 'Set mutual 12-month fee cap.'
+    },
+    {
+      id: 'c-2',
+      title: 'Perpetual AI Model Training License',
+      category: 'Data Privacy & AI',
+      severity: 'critical',
+      excerpt: 'Perpetual, irrevocable license to train AI models.',
+      rationale: 'Permits vendor to absorb confidential customer IP into models.',
+      redlineProposal: 'Add Zero Data Retention / No Training addendum.'
     }
   ],
   crossClauseFindings: [
     {
       id: 'x-1',
       title: 'Liability Cap + AI Training Compound Risk',
-      involvedClauses: ['c-1'],
-      impact: 'Vendor trains on customer data without meaningful financial accountability.',
-      negotiationMove: 'Add zero-training addendum and carve out confidentiality from cap.'
+      involvedClauses: ['c-1', 'c-2'],
+      impact:
+        'Vendor trains on customer data without meaningful financial accountability.',
+      negotiationMove:
+        'Add zero-training addendum and carve out confidentiality from cap.'
     }
   ],
-  complianceFlags: ['GDPR Art. 33']
+  complianceFlags: ['GDPR Art. 33', 'GDPR Art. 5']
 });
 
 describe('probeChromeNanoAvailability', () => {
@@ -50,12 +87,37 @@ describe('probeChromeNanoAvailability', () => {
   });
 });
 
+describe('chunkDocumentText', () => {
+  it('keeps short documents in a single chunk without truncation', () => {
+    const res = chunkDocumentText(SAMPLE_DOCUMENTS[0].content, 10000);
+    expect(res.chunkCount).toBe(1);
+    expect(res.wasChunked).toBe(false);
+    expect(res.wasTruncated).toBe(false);
+    expect(res.estimatedTokens).toBeGreaterThan(0);
+  });
+
+  it('splits long multi-section contracts along section boundaries and tracks truncation', () => {
+    const longContract = [
+      '1. DEFINITIONS\n' + 'Confidential information means all data. '.repeat(20),
+      '2. DATA RIGHTS\n' + 'Vendor may process customer records. '.repeat(20),
+      '3. LIABILITY\n' + 'Aggregate liability is capped at $100. '.repeat(20),
+      '4. TERMINATION\n' + 'Auto-renews unless 90 days notice given. '.repeat(20)
+    ].join('\n\n');
+
+    const res = chunkDocumentText(longContract, 900, 3);
+    expect(res.wasChunked).toBe(true);
+    expect(res.chunkCount).toBe(3);
+    expect(res.wasTruncated).toBe(true);
+    expect(res.chunks[0]).toContain('1. DEFINITIONS');
+  });
+});
+
 describe('runHybridDocumentAnalysis', () => {
   it('records ON-DEVICE telemetry and masks PII before inference when Firebase AI Logic runs on-device', async () => {
     const promptsSent: string[] = [];
     const mockModel: HybridModelRunner = {
-      generateContent: vi.fn(async (prompt: string) => {
-        promptsSent.push(prompt);
+      generateContent: vi.fn(async (prompt) => {
+        promptsSent.push(typeof prompt === 'string' ? prompt : JSON.stringify(prompt));
         return {
           response: {
             text: () => VALID_JSON_RESPONSE,
@@ -82,19 +144,23 @@ describe('runHybridDocumentAnalysis', () => {
 
     expect(promptsSent[0]).not.toContain('jordan.vance@acmerobotics.io');
     expect(promptsSent[0]).not.toContain('123-45-6789');
+    expect(promptsSent[0]).not.toContain('4532-8910-4412-9089');
     expect(promptsSent[0]).not.toContain('sk-live-9f8a7b6c5d4e3f2a1b0c9d8e');
+    expect(promptsSent[0]).not.toContain('Suite 400');
     expect(promptsSent[0]).toContain('[EMAIL_1]');
     expect(promptsSent[0]).toContain('[SSN_1]');
+    expect(promptsSent[0]).toContain('[CARD_1]');
+    expect(promptsSent[0]).toContain('[ADDRESS_1]');
   });
 
-  it('records CLOUD FALLBACK telemetry with usageMetadata when PREFER_ON_DEVICE falls back to cloud', async () => {
+  it('deduplicates redundant Stage 2 Cloud call when Stage 1 already executed in Cloud', async () => {
     const promptsSent: string[] = [];
     const mockModel: HybridModelRunner = {
-      generateContent: vi.fn(async (prompt: string) => {
-        promptsSent.push(prompt);
+      generateContent: vi.fn(async (prompt) => {
+        promptsSent.push(typeof prompt === 'string' ? prompt : JSON.stringify(prompt));
         return {
           response: {
-            text: () => VALID_JSON_RESPONSE,
+            text: () => ESCALATED_JSON_RESPONSE,
             inferenceSource: 'in_cloud' as const,
             usageMetadata: {
               promptTokenCount: 410,
@@ -120,12 +186,216 @@ describe('runHybridDocumentAnalysis', () => {
     expect(report.triageTelemetry.inferenceSource).toBe('in_cloud');
     expect(report.triageTelemetry.totalTokens).toBe(600);
     expect(report.triageTelemetry.tokenCountSource).toBe('usage_metadata');
+    expect(report.triageTelemetry.deduplicated).toBe(true);
     expect(report.triageTelemetry.fallbackReason).toContain('unavailable');
 
-    expect(report.escalation).not.toBeNull();
-    expect(report.escalationTelemetry?.badge).toBe('CLOUD ESCALATION');
-    expect(promptsSent).toHaveLength(2);
-    expect(promptsSent[1]).not.toContain('4532-8910-4412-9081');
+    // Only 1 Cloud call fired — no redundant duplicate Stage 2 Cloud call
+    expect(promptsSent).toHaveLength(1);
+    expect(report.escalation).toBeNull();
+    expect(report.escalationTelemetry).toBeNull();
+    expect(report.escalationBlockedReason).toContain('deduplicated');
+    expect(report.notes.some((n) => n.includes('deduplicated'))).toBe(true);
+  });
+
+  it('runs Stage 0.5 semantic PII scrubbing strictly on-device before Stage 2 Cloud Escalation and computes HybridDelta', async () => {
+    const factoryCalls: Array<{ mode: string; schemaKey?: string }> = [];
+    const cloudPrompts: string[] = [];
+
+    const semanticModel: HybridModelRunner = {
+      generateContent: vi.fn(async () => ({
+        response: {
+          text: () =>
+            JSON.stringify({
+              entities: [
+                { value: 'Acme Robotics Inc.', category: 'ORG' }
+              ]
+            }),
+          inferenceSource: 'on_device' as const
+        }
+      }))
+    };
+
+    const onDeviceTriageModel: HybridModelRunner = {
+      countTokens: vi.fn(async () => ({ totalTokens: 320 })),
+      generateContent: vi.fn(async () => ({
+        response: {
+          text: () => VALID_JSON_RESPONSE,
+          inferenceSource: 'on_device' as const
+        }
+      }))
+    };
+
+    const cloudEscalationModel: HybridModelRunner = {
+      generateContent: vi.fn(async (prompt) => {
+        cloudPrompts.push(typeof prompt === 'string' ? prompt : JSON.stringify(prompt));
+        return {
+          response: {
+            text: () => ESCALATED_JSON_RESPONSE,
+            inferenceSource: 'in_cloud' as const,
+            usageMetadata: {
+              promptTokenCount: 500,
+              candidatesTokenCount: 250,
+              totalTokenCount: 750
+            }
+          }
+        };
+      })
+    };
+
+    const report = await runHybridDocumentAnalysis(SAMPLE_DOCUMENTS[0].content, {
+      policyMode: 'prefer_on_device',
+      runCloudEscalation: true,
+      enableSemanticPii: true,
+      isOnline: true,
+      chromeNanoAvailability: 'available',
+      useSimulatedSandbox: false,
+      cloudModelName: 'gemini-3-flash-preview',
+      modelFactory: (mode, schemaKey) => {
+        factoryCalls.push({ mode, schemaKey });
+        if (schemaKey === 'semantic_pii') return semanticModel;
+        if (mode === 'only_in_cloud') return cloudEscalationModel;
+        return onDeviceTriageModel;
+      }
+    });
+
+    expect(factoryCalls[0]).toEqual({
+      mode: 'only_on_device',
+      schemaKey: 'semantic_pii'
+    });
+    expect(report.semanticPii?.status).toBe('completed');
+    expect(report.semanticPii?.entitiesAdded).toBe(1);
+    expect(report.redaction.countsByCategory.ORG).toBe(1);
+    expect(cloudPrompts).toHaveLength(1);
+    expect(cloudPrompts[0]).not.toContain('Acme Robotics Inc.');
+    expect(cloudPrompts[0]).toContain('[ORG_1]');
+    expect(report.chunkInfo?.tokenProbeSource).toBe('sdk_count_tokens');
+    expect(report.chunkInfo?.estimatedTokens).toBe(320);
+
+    // Verify Stage 1 vs Stage 2 delta calculation
+    expect(report.delta.newClausesCount).toBe(1);
+    expect(report.delta.upgradedSeverityCount).toBe(1);
+    expect(report.delta.newCrossClauseCount).toBe(1);
+    expect(report.delta.riskScoreDelta).toBe(15);
+    expect(report.delta.combinedTokens).toBe(
+      report.triageTelemetry.totalTokens +
+        (report.escalationTelemetry?.totalTokens ?? 0)
+    );
+  });
+
+  it('gracefully records unavailable semantic PII when Gemini Nano is not available', async () => {
+    const mockModel: HybridModelRunner = {
+      generateContent: vi.fn(async () => ({
+        response: {
+          text: () => VALID_JSON_RESPONSE,
+          inferenceSource: 'in_cloud' as const
+        }
+      }))
+    };
+
+    const report = await runHybridDocumentAnalysis(SAMPLE_DOCUMENTS[0].content, {
+      policyMode: 'prefer_on_device',
+      runCloudEscalation: false,
+      enableSemanticPii: true,
+      isOnline: true,
+      chromeNanoAvailability: 'unsupported',
+      useSimulatedSandbox: false,
+      cloudModelName: 'gemini-3-flash-preview',
+      modelFactory: () => mockModel
+    });
+
+    expect(report.semanticPii?.status).toBe('unavailable');
+    expect(report.semanticPii?.entitiesAdded).toBe(0);
+    expect(report.triage.clauses.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('uses generateContentStream when available, emits progress callbacks, and honors AbortSignal', async () => {
+    const chunksReceived: Array<{ chunk: string; stage: PipelineStage }> = [];
+    const stagesSeen: PipelineStage[] = [];
+
+    const streamingModel: HybridModelRunner = {
+      generateContent: vi.fn(),
+      generateContentStream: vi.fn(async () => {
+        async function* gen() {
+          yield { text: () => '{"documentType":' };
+          yield { text: () => '"SaaS MSA"}' };
+        }
+        return {
+          stream: gen(),
+          response: Promise.resolve({
+            text: () => VALID_JSON_RESPONSE,
+            inferenceSource: 'on_device' as const
+          })
+        };
+      })
+    };
+
+    const report = await runHybridDocumentAnalysis(SAMPLE_DOCUMENTS[0].content, {
+      policyMode: 'prefer_on_device',
+      runCloudEscalation: false,
+      isOnline: true,
+      chromeNanoAvailability: 'available',
+      useSimulatedSandbox: false,
+      cloudModelName: 'gemini-3-flash-preview',
+      modelFactory: () => streamingModel,
+      onStreamChunk: (chunk, stage) => chunksReceived.push({ chunk, stage }),
+      onStageChange: (stage) => stagesSeen.push(stage)
+    });
+
+    expect(report.triageTelemetry.streamed).toBe(true);
+    expect(streamingModel.generateContent).not.toHaveBeenCalled();
+    expect(chunksReceived).toHaveLength(2);
+    expect(stagesSeen).toEqual(['pii_redaction', 'triage', 'complete']);
+
+    // Verify AbortSignal stops execution cleanly
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      runHybridDocumentAnalysis(SAMPLE_DOCUMENTS[0].content, {
+        policyMode: 'prefer_on_device',
+        runCloudEscalation: false,
+        isOnline: true,
+        chromeNanoAvailability: 'available',
+        useSimulatedSandbox: false,
+        cloudModelName: 'gemini-3-flash-preview',
+        modelFactory: () => streamingModel,
+        signal: controller.signal
+      })
+    ).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
+  it('passes inlineAttachments as multimodal inlineData parts to the model', async () => {
+    let receivedRequest: unknown;
+    const mockModel: HybridModelRunner = {
+      generateContent: vi.fn(async (req) => {
+        receivedRequest = req;
+        return {
+          response: {
+            text: () => VALID_JSON_RESPONSE,
+            inferenceSource: 'on_device' as const
+          }
+        };
+      })
+    };
+
+    await runHybridDocumentAnalysis('Scanned contract header', {
+      policyMode: 'prefer_on_device',
+      runCloudEscalation: false,
+      isOnline: true,
+      chromeNanoAvailability: 'available',
+      useSimulatedSandbox: false,
+      cloudModelName: 'gemini-3-flash-preview',
+      inlineAttachments: [
+        { mimeType: 'image/png', data: 'iVBORw0KGgo=', name: 'scan.png' }
+      ],
+      modelFactory: () => mockModel
+    });
+
+    expect(Array.isArray(receivedRequest)).toBe(true);
+    const parts = receivedRequest as Array<unknown>;
+    expect(parts[1]).toEqual({
+      type: 'inlineData',
+      inlineData: { mimeType: 'image/png', data: 'iVBORw0KGgo=' }
+    });
   });
 
   it('blocks Stage 2 cloud escalation cleanly under ONLY_ON_DEVICE air-gapped mode', async () => {
@@ -182,20 +452,44 @@ describe('runHybridDocumentAnalysis', () => {
     expect(report.escalationBlockedReason).toContain('offline');
   });
 
-  it('runs deterministic sandbox simulation when Firebase env is unconfigured', async () => {
-    const report = await runHybridDocumentAnalysis(SAMPLE_DOCUMENTS[0].content, {
-      policyMode: 'prefer_on_device',
-      runCloudEscalation: true,
-      isOnline: true,
-      chromeNanoAvailability: 'unsupported',
-      useSimulatedSandbox: true,
-      cloudModelName: 'gemini-3-flash-preview'
-    });
+  it('honestly labels Sandbox mode as SIMULATED CLOUD when Nano is unsupported and SIMULATED ON-DEVICE when available', async () => {
+    const unsupportedReport = await runHybridDocumentAnalysis(
+      SAMPLE_DOCUMENTS[0].content,
+      {
+        policyMode: 'prefer_on_device',
+        runCloudEscalation: true,
+        isOnline: true,
+        chromeNanoAvailability: 'unsupported',
+        useSimulatedSandbox: true,
+        cloudModelName: 'gemini-3-flash-preview'
+      }
+    );
 
-    expect(report.triageTelemetry.badge).toBe('SIMULATED ON-DEVICE');
-    expect(report.escalationTelemetry?.badge).toBe('SIMULATED CLOUD');
-    expect(report.triage.clauses.length).toBeGreaterThanOrEqual(4);
-    expect(report.escalation?.crossClauseFindings.length).toBeGreaterThanOrEqual(1);
+    expect(unsupportedReport.triageTelemetry.badge).toBe('SIMULATED CLOUD');
+    expect(unsupportedReport.triageTelemetry.fallbackReason).toContain(
+      'unsupported'
+    );
+    expect(unsupportedReport.triageTelemetry.deduplicated).toBe(true);
+    expect(unsupportedReport.escalationTelemetry).toBeNull();
+
+    const availableReport = await runHybridDocumentAnalysis(
+      SAMPLE_DOCUMENTS[0].content,
+      {
+        policyMode: 'prefer_on_device',
+        runCloudEscalation: true,
+        isOnline: true,
+        chromeNanoAvailability: 'available',
+        useSimulatedSandbox: true,
+        cloudModelName: 'gemini-3-flash-preview'
+      }
+    );
+
+    expect(availableReport.triageTelemetry.badge).toBe('SIMULATED ON-DEVICE');
+    expect(availableReport.escalationTelemetry?.badge).toBe('SIMULATED CLOUD');
+    expect(availableReport.triage.clauses.length).toBeGreaterThanOrEqual(4);
+    expect(
+      availableReport.escalation?.crossClauseFindings.length
+    ).toBeGreaterThanOrEqual(1);
   });
 
   it('degrades gracefully when Stage 1 and Stage 2 fail with 401 Firebase App Check error', async () => {
@@ -272,5 +566,139 @@ describe('runHybridDocumentAnalysis', () => {
       'escalation'
     );
     expect(netErr.kind).toBe('network_or_api');
+  });
+
+  it('computes HybridDelta accurately across clauses, severities, cross-clauses, and risk score', () => {
+    const triage: DocumentAnalysisResult = JSON.parse(VALID_JSON_RESPONSE);
+    const escalation: DocumentAnalysisResult = JSON.parse(ESCALATED_JSON_RESPONSE);
+    const delta = computeHybridDelta(
+      triage,
+      escalation,
+      {
+        stage: 'triage',
+        badge: 'ON-DEVICE',
+        requestedMode: 'prefer_on_device',
+        inferenceSource: 'on_device',
+        modelName: 'Gemini Nano',
+        latencyMs: 120,
+        promptTokens: 200,
+        candidateTokens: 100,
+        totalTokens: 300,
+        tokenCountSource: 'estimated',
+        piiMaskedBeforeInference: 4,
+        timestamp: new Date().toISOString()
+      },
+      {
+        stage: 'escalation',
+        badge: 'CLOUD ESCALATION',
+        requestedMode: 'only_in_cloud',
+        inferenceSource: 'in_cloud',
+        modelName: 'gemini-3-flash-preview',
+        latencyMs: 450,
+        promptTokens: 500,
+        candidateTokens: 250,
+        totalTokens: 750,
+        tokenCountSource: 'usage_metadata',
+        piiMaskedBeforeInference: 4,
+        timestamp: new Date().toISOString()
+      },
+      { status: 'completed', entitiesAdded: 2, latencyMs: 80 }
+    );
+
+    expect(delta).toEqual({
+      newClausesCount: 1,
+      upgradedSeverityCount: 1,
+      newCrossClauseCount: 1,
+      riskScoreDelta: 15,
+      totalLatencyMs: 650,
+      combinedTokens: 1050
+    });
+  });
+});
+
+describe('createClauseNegotiator & negotiateClauseTurn', () => {
+  const sampleClause = {
+    id: 'c-1',
+    title: 'Vendor $100 Liability Cap',
+    category: 'Liability',
+    severity: 'critical' as const,
+    excerpt: 'Vendor liability shall not exceed $100 USD.',
+    rationale: 'Asymmetric financial exposure.',
+    redlineProposal: 'Set mutual 12-month fee cap.'
+  };
+
+  it('runs multi-turn streaming negotiation via startChat using PREFER_ON_DEVICE online and ONLY_ON_DEVICE offline', async () => {
+    const factoryCalls: Array<{ mode: string; schemaKey?: string }> = [];
+    const streamedChunks: string[] = [];
+
+    const mockModel: HybridModelRunner = {
+      generateContent: vi.fn(),
+      startChat: vi.fn(() => ({
+        sendMessage: vi.fn(),
+        sendMessageStream: vi.fn(async (msg) => {
+          async function* gen() {
+            yield { text: () => 'Counter-proposal: ' };
+            yield { text: () => `12-month mutual cap for "${String(msg)}"` };
+          }
+          return {
+            stream: gen(),
+            response: Promise.resolve({
+              text: () => `Counter-proposal: 12-month mutual cap for "${String(msg)}"`,
+              inferenceSource: 'on_device' as const
+            })
+          };
+        })
+      }))
+    };
+
+    const negotiator = createClauseNegotiator({
+      clause: sampleClause,
+      redactedDocumentContext: 'Contract with [ORG_1] and [EMAIL_1].',
+      isOnline: true,
+      chromeNanoAvailability: 'available',
+      modelFactory: (mode, schemaKey) => {
+        factoryCalls.push({ mode, schemaKey });
+        return mockModel;
+      }
+    });
+
+    expect(negotiator.effectiveMode).toBe('prefer_on_device');
+
+    const reply = await negotiator.sendMessage('Make it softer for a startup vendor', {
+      onStreamChunk: (chunk) => streamedChunks.push(chunk)
+    });
+
+    expect(factoryCalls).toEqual([
+      { mode: 'prefer_on_device', schemaKey: 'negotiation_chat' }
+    ]);
+    expect(reply.inferenceSource).toBe('on_device');
+    expect(reply.streamed).toBe(true);
+    expect(streamedChunks).toHaveLength(2);
+    expect(negotiator.getHistory()).toHaveLength(2);
+
+    // Offline forces ONLY_ON_DEVICE
+    const offlineNegotiator = createClauseNegotiator({
+      clause: sampleClause,
+      redactedDocumentContext: 'Redacted text',
+      isOnline: false,
+      chromeNanoAvailability: 'available',
+      modelFactory: () => mockModel
+    });
+    expect(offlineNegotiator.effectiveMode).toBe('only_on_device');
+  });
+
+  it('falls back cleanly in sandbox mode via negotiateClauseTurn', async () => {
+    const reply = await negotiateClauseTurn({
+      clause: sampleClause,
+      redactedDocumentContext: 'Redacted context',
+      isOnline: false,
+      chromeNanoAvailability: 'unsupported',
+      useSimulatedSandbox: true,
+      userMessage: 'Give me a firm enterprise redline'
+    });
+
+    expect(reply.role).toBe('model');
+    expect(reply.inferenceSource).toBe('simulated');
+    expect(reply.text).toContain('Set mutual 12-month fee cap.');
   });
 });

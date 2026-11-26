@@ -21,12 +21,14 @@ import {
   type AI,
   type GenerativeModel,
   type HybridParams,
-  type ObjectSchema
+  type ObjectSchema,
+  type Part
 } from 'firebase/ai';
 import type {
   AppCheckStatus,
   FirebaseRuntimeStatus,
-  HybridPolicyMode
+  HybridPolicyMode,
+  InlineAttachment
 } from '../types/analysis';
 
 declare global {
@@ -36,6 +38,10 @@ declare global {
 }
 
 export type AppCheckProviderKind = 'recaptcha-enterprise' | 'recaptcha-v3';
+export type ModelSchemaKey =
+  | 'document_analysis'
+  | 'semantic_pii'
+  | 'negotiation_chat';
 
 export interface FirebaseEnvConfig {
   firebaseOptions: FirebaseOptions;
@@ -176,12 +182,80 @@ export const ON_DEVICE_JSON_CONSTRAINT: Record<string, unknown> = {
   required: ['documentType', 'overallRiskScore', 'riskPosture', 'executiveSummary', 'clauses']
 };
 
+/**
+ * Stage 0.5 On-Device Semantic PII extraction schema (person names, organizations, codenames).
+ */
+export const SEMANTIC_PII_SCHEMA: ObjectSchema = Schema.object({
+  properties: {
+    entities: Schema.array({
+      items: Schema.object({
+        properties: {
+          value: Schema.string({
+            description: 'Exact sensitive entity substring appearing in the text.'
+          }),
+          category: Schema.enumString({
+            enum: ['PERSON', 'ORG', 'CODENAME'],
+            description: 'Semantic entity class.'
+          })
+        }
+      })
+    })
+  }
+});
+
+export const SEMANTIC_PII_ON_DEVICE_CONSTRAINT: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    entities: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          value: { type: 'string' },
+          category: { type: 'string', enum: ['PERSON', 'ORG', 'CODENAME'] }
+        },
+        required: ['value', 'category']
+      }
+    }
+  },
+  required: ['entities']
+};
+
+/**
+ * Builds either a plain text prompt or a multimodal Parts array including
+ * inlineData attachments (e.g., scanned contract images or PDF pages).
+ */
+export function buildMultimodalContentParts(
+  prompt: string,
+  attachments?: InlineAttachment[]
+): string | Array<string | Part> {
+  if (!attachments || attachments.length === 0) {
+    return prompt;
+  }
+  const parts: Array<string | Part> = [prompt];
+  for (const att of attachments) {
+    if (!att.mimeType || !att.data) continue;
+    parts.push({
+      type: 'inlineData',
+      inlineData: {
+        mimeType: att.mimeType,
+        data: att.data
+      }
+    });
+  }
+  return parts.length === 1 ? prompt : parts;
+}
+
 export interface FirebaseServicesHandle {
   app: FirebaseApp;
   ai: AI;
   appCheck: AppCheck | null;
   status: FirebaseRuntimeStatus;
-  getHybridModel: (mode: HybridPolicyMode) => GenerativeModel;
+  getHybridModel: (
+    mode: HybridPolicyMode,
+    schemaKey?: ModelSchemaKey
+  ) => GenerativeModel;
+  clearModelCache: () => void;
   refreshAppCheckStatus: () => Promise<AppCheckStatus>;
 }
 
@@ -210,6 +284,16 @@ function getAppCheckTokenWithTimeout(
 }
 
 let cachedHandle: FirebaseServicesHandle | null = null;
+const modelCache = new Map<string, GenerativeModel>();
+
+export function resetModelCache(): void {
+  modelCache.clear();
+}
+
+export function resetFirebaseClientForTests(): void {
+  modelCache.clear();
+  cachedHandle = null;
+}
 
 export function mapPolicyToSdkInferenceMode(mode: HybridPolicyMode): InferenceMode {
   switch (mode) {
@@ -222,6 +306,71 @@ export function mapPolicyToSdkInferenceMode(mode: HybridPolicyMode): InferenceMo
     case 'only_in_cloud':
       return InferenceMode.ONLY_IN_CLOUD;
   }
+}
+
+function buildHybridParams(
+  mode: HybridPolicyMode,
+  schemaKey: ModelSchemaKey,
+  cloudModel: string
+): HybridParams {
+  if (schemaKey === 'semantic_pii') {
+    return {
+      mode: InferenceMode.ONLY_ON_DEVICE,
+      onDeviceParams: {
+        createOptions: {
+          expectedInputs: [{ type: 'text', languages: ['en'] }],
+          expectedOutputs: [{ type: 'text', languages: ['en'] }]
+        },
+        promptOptions: {
+          responseConstraint: SEMANTIC_PII_ON_DEVICE_CONSTRAINT
+        }
+      },
+      inCloudParams: {
+        model: cloudModel,
+        generationConfig: {
+          responseMimeType: 'application/json',
+          responseSchema: SEMANTIC_PII_SCHEMA
+        }
+      }
+    };
+  }
+
+  if (schemaKey === 'negotiation_chat') {
+    return {
+      mode: mapPolicyToSdkInferenceMode(mode),
+      onDeviceParams: {
+        createOptions: {
+          expectedInputs: [{ type: 'text', languages: ['en'] }],
+          expectedOutputs: [{ type: 'text', languages: ['en'] }]
+        }
+      },
+      inCloudParams: {
+        model: cloudModel,
+        systemInstruction:
+          'You are LocalShield Clause Negotiator. Help the user draft pragmatic legal counter-proposals and negotiation talking points using ONLY the PII-redacted contract context provided.'
+      }
+    };
+  }
+
+  return {
+    mode: mapPolicyToSdkInferenceMode(mode),
+    onDeviceParams: {
+      createOptions: {
+        expectedInputs: [{ type: 'text', languages: ['en'] }],
+        expectedOutputs: [{ type: 'text', languages: ['en'] }]
+      },
+      promptOptions: {
+        responseConstraint: ON_DEVICE_JSON_CONSTRAINT
+      }
+    },
+    inCloudParams: {
+      model: cloudModel,
+      generationConfig: {
+        responseMimeType: 'application/json',
+        responseSchema: DOCUMENT_ANALYSIS_SCHEMA
+      }
+    }
+  };
 }
 
 export async function initializeFirebaseServices(): Promise<FirebaseServicesHandle | null> {
@@ -293,27 +442,26 @@ export async function initializeFirebaseServices(): Promise<FirebaseServicesHand
     useLimitedUseAppCheckTokens: config.useLimitedUseAppCheckTokens
   });
 
-  const getHybridModel = (mode: HybridPolicyMode): GenerativeModel => {
-    const hybridParams: HybridParams = {
-      mode: mapPolicyToSdkInferenceMode(mode),
-      onDeviceParams: {
-        createOptions: {
-          expectedInputs: [{ type: 'text', languages: ['en'] }],
-          expectedOutputs: [{ type: 'text', languages: ['en'] }]
-        },
-        promptOptions: {
-          responseConstraint: ON_DEVICE_JSON_CONSTRAINT
-        }
-      },
-      inCloudParams: {
-        model: config.cloudModel,
-        generationConfig: {
-          responseMimeType: 'application/json',
-          responseSchema: DOCUMENT_ANALYSIS_SCHEMA
-        }
-      }
-    };
-    return getGenerativeModel(ai, hybridParams);
+  const getHybridModel = (
+    mode: HybridPolicyMode,
+    schemaKey: ModelSchemaKey = 'document_analysis'
+  ): GenerativeModel => {
+    const effectiveMode =
+      schemaKey === 'semantic_pii' ? 'only_on_device' : mode;
+    const cacheKey = `${effectiveMode}::${schemaKey}`;
+    const existing = modelCache.get(cacheKey);
+    if (existing) {
+      return existing;
+    }
+
+    const hybridParams = buildHybridParams(
+      effectiveMode,
+      schemaKey,
+      config.cloudModel
+    );
+    const model = getGenerativeModel(ai, hybridParams);
+    modelCache.set(cacheKey, model);
+    return model;
   };
 
   const refreshAppCheckStatus = async (): Promise<AppCheckStatus> => {
@@ -369,6 +517,7 @@ export async function initializeFirebaseServices(): Promise<FirebaseServicesHand
       missingEnvKeys: []
     },
     getHybridModel,
+    clearModelCache: resetModelCache,
     refreshAppCheckStatus
   };
 

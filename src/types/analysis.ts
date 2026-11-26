@@ -46,13 +46,34 @@ export interface FirebaseRuntimeStatus {
 
 export type PiiCategory =
   | 'API_SECRET'
+  | 'AWS_KEY'
+  | 'JWT'
   | 'SSN'
+  | 'EIN'
   | 'CARD'
   | 'IBAN'
   | 'EMAIL'
   | 'PHONE'
   | 'IPV4'
-  | 'ADDRESS';
+  | 'ADDRESS'
+  | 'CUSTOM'
+  | 'PERSON'
+  | 'ORG'
+  | 'CODENAME';
+
+export type SemanticPiiCategory = 'PERSON' | 'ORG' | 'CODENAME';
+
+export interface SemanticPiiEntity {
+  value: string;
+  category: SemanticPiiCategory;
+}
+
+export interface SemanticPiiReport {
+  status: 'completed' | 'skipped' | 'unavailable' | 'failed';
+  entitiesAdded: number;
+  latencyMs: number;
+  reason?: string;
+}
 
 export interface PiiMatch {
   token: string;
@@ -101,6 +122,27 @@ export interface DocumentAnalysisResult {
   complianceFlags: string[];
 }
 
+export interface InlineAttachment {
+  mimeType: string;
+  data: string;
+  name?: string;
+}
+
+export interface DocumentChunkInfo {
+  chunkCount: number;
+  estimatedTokens: number;
+  wasChunked: boolean;
+  wasTruncated: boolean;
+  tokenProbeSource: 'sdk_count_tokens' | 'estimated';
+}
+
+export type PipelineStage =
+  | 'pii_redaction'
+  | 'semantic_pii'
+  | 'triage'
+  | 'escalation'
+  | 'complete';
+
 export interface RunTelemetry {
   stage: 'triage' | 'escalation';
   badge: TelemetryBadgeKind;
@@ -114,7 +156,22 @@ export interface RunTelemetry {
   tokenCountSource: 'usage_metadata' | 'estimated';
   piiMaskedBeforeInference: number;
   fallbackReason?: string;
+  streamed?: boolean;
+  chunkCount?: number;
+  estimatedTokens?: number;
+  wasChunked?: boolean;
+  deduplicated?: boolean;
+  note?: string;
   timestamp: string;
+}
+
+export interface HybridDelta {
+  newClausesCount: number;
+  upgradedSeverityCount: number;
+  newCrossClauseCount: number;
+  riskScoreDelta: number;
+  totalLatencyMs: number;
+  combinedTokens: number;
 }
 
 export type CloudErrorKind = 'app_check_401' | 'network_or_api' | 'unknown';
@@ -129,10 +186,22 @@ export interface CloudDegradationInfo {
 
 export interface HybridExecutionReport {
   redaction: RedactionResult;
+  semanticPii?: SemanticPiiReport;
+  chunkInfo?: DocumentChunkInfo;
   triage: DocumentAnalysisResult;
   escalation: DocumentAnalysisResult | null;
   triageTelemetry: RunTelemetry;
   escalationTelemetry: RunTelemetry | null;
+  delta: HybridDelta;
+  notes: string[];
   escalationBlockedReason?: string;
   cloudDegradation?: CloudDegradationInfo;
+}
+
+export interface ClauseNegotiationMessage {
+  role: 'user' | 'model';
+  text: string;
+  inferenceSource?: 'on_device' | 'in_cloud' | 'simulated' | 'local_heuristic';
+  streamed?: boolean;
+  timestamp: string;
 }

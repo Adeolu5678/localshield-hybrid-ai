@@ -115,6 +115,70 @@ function normalizeCrossFindings(rawFindings: unknown): CrossClauseFinding[] {
   });
 }
 
+export type FlaggedClause = RiskClause;
+
+/**
+ * Safely extracts any complete `{ ... }` clause objects already streamed
+ * inside the `"clauses"` array of a partial JSON response.
+ */
+export function extractPartialClausesFromStream(rawText: string): FlaggedClause[] {
+  if (!rawText) return [];
+  const clausesKeyIdx = rawText.indexOf('"clauses"');
+  if (clausesKeyIdx === -1) return [];
+  const arrayStart = rawText.indexOf('[', clausesKeyIdx);
+  if (arrayStart === -1) return [];
+
+  const rawObjects: unknown[] = [];
+  let inString = false;
+  let escapeNext = false;
+  let depth = 0;
+  let objStart = -1;
+
+  for (let i = arrayStart + 1; i < rawText.length; i++) {
+    const ch = rawText[i];
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+    if (ch === '\\' && inString) {
+      escapeNext = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+
+    if (ch === '{') {
+      if (depth === 0) {
+        objStart = i;
+      }
+      depth++;
+    } else if (ch === '}') {
+      if (depth > 0) {
+        depth--;
+        if (depth === 0 && objStart !== -1) {
+          const slice = rawText.slice(objStart, i + 1);
+          try {
+            const parsed = JSON.parse(slice);
+            if (typeof parsed === 'object' && parsed !== null) {
+              rawObjects.push(parsed);
+            }
+          } catch {
+            // Incomplete or malformed object; skip safely.
+          }
+          objStart = -1;
+        }
+      }
+    } else if (ch === ']' && depth === 0) {
+      break;
+    }
+  }
+
+  return normalizeClauses(rawObjects);
+}
+
 /**
  * Parses model output (raw JSON or markdown-fenced JSON from Gemini Nano / Cloud)
  * into a strongly typed DocumentAnalysisResult.

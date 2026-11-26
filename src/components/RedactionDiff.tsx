@@ -1,25 +1,37 @@
 import { useState, type ReactNode } from 'react';
-import type { PiiCategory, RedactionResult } from '../types/analysis';
+import type {
+  PiiCategory,
+  RedactionResult,
+  SemanticPiiReport
+} from '../types/analysis';
 
 interface RedactionDiffProps {
   redaction: RedactionResult;
+  semanticPii?: SemanticPiiReport;
 }
 
 const CATEGORY_ORDER: PiiCategory[] = [
+  'AWS_KEY',
+  'JWT',
   'API_SECRET',
   'SSN',
+  'EIN',
   'CARD',
   'IBAN',
   'EMAIL',
   'PHONE',
   'IPV4',
-  'ADDRESS'
+  'ADDRESS',
+  'CUSTOM',
+  'PERSON',
+  'ORG',
+  'CODENAME'
 ];
 
 const TOKEN_SPLIT_RE =
-  /(\[(?:API_SECRET|SSN|CARD|IBAN|EMAIL|PHONE|IPV4|ADDRESS)_\d+\])/g;
+  /(\[(?:API_SECRET|AWS_KEY|JWT|SSN|EIN|CARD|IBAN|EMAIL|PHONE|IPV4|ADDRESS|CUSTOM|PERSON|ORG|CODENAME)_\d+\])/g;
 const TOKEN_EXACT_RE =
-  /^\[(?:API_SECRET|SSN|CARD|IBAN|EMAIL|PHONE|IPV4|ADDRESS)_\d+\]$/;
+  /^\[(?:API_SECRET|AWS_KEY|JWT|SSN|EIN|CARD|IBAN|EMAIL|PHONE|IPV4|ADDRESS|CUSTOM|PERSON|ORG|CODENAME)_\d+\]$/;
 
 function renderHighlightedPayload(text: string): ReactNode {
   if (!text.trim()) {
@@ -41,7 +53,7 @@ function renderHighlightedPayload(text: string): ReactNode {
   );
 }
 
-export function RedactionDiff({ redaction }: RedactionDiffProps) {
+export function RedactionDiff({ redaction, semanticPii }: RedactionDiffProps) {
   const [view, setView] = useState<'redacted' | 'vault'>('redacted');
   const [copied, setCopied] = useState(false);
 
@@ -49,6 +61,10 @@ export function RedactionDiff({ redaction }: RedactionDiffProps) {
     (cat) => redaction.countsByCategory[cat] > 0
   );
   const vaultEntries = Object.entries(redaction.vault);
+  const semanticEntityTotal =
+    redaction.countsByCategory.PERSON +
+    redaction.countsByCategory.ORG +
+    redaction.countsByCategory.CODENAME;
 
   const handleCopyRedacted = async () => {
     try {
@@ -100,6 +116,29 @@ export function RedactionDiff({ redaction }: RedactionDiffProps) {
           </button>
         </div>
       </div>
+
+      {semanticPii && semanticPii.status !== 'skipped' && (
+        <div
+          className={`semantic-pii-strip ${
+            semanticPii.status === 'completed'
+              ? 'semantic-strip-ok'
+              : 'semantic-strip-muted'
+          }`}
+        >
+          <span className="badge badge-emerald mono">
+            STAGE 0.5 · {semanticPii.status.toUpperCase()}
+          </span>
+          <span className="muted-sm">
+            {semanticPii.reason ??
+              `On-device semantic scan added ${semanticPii.entitiesAdded} token(s).`}
+          </span>
+          <span className="mono muted-sm">
+            PERSON:{redaction.countsByCategory.PERSON} · ORG:
+            {redaction.countsByCategory.ORG} · CODENAME:
+            {redaction.countsByCategory.CODENAME} ({semanticEntityTotal} total)
+          </span>
+        </div>
+      )}
 
       {activeCategories.length > 0 && (
         <div className="pii-chips">
