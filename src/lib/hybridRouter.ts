@@ -1070,14 +1070,17 @@ export async function runHybridDocumentAnalysis(
   const triageStart = now();
 
   if (options.modelFactory && !options.useSimulatedSandbox) {
-    try {
-      const model = options.modelFactory(options.policyMode, 'document_analysis');
+    const executeStage1 = async (
+      schemaKey: ModelSchemaKey,
+      activeChunked: ChunkedDocument
+    ) => {
+      const model = options.modelFactory!(options.policyMode, schemaKey);
       const compactForNano =
         options.chromeNanoAvailability === 'available' &&
         options.policyMode !== 'only_in_cloud';
-      const firstPrompt = buildTriagePrompt(chunked.chunks[0], {
+      const firstPrompt = buildTriagePrompt(activeChunked.chunks[0], {
         index: 0,
-        total: chunked.chunkCount,
+        total: activeChunked.chunkCount,
         compactForNano
       });
       const firstRequest = buildMultimodalContentParts(
@@ -1087,7 +1090,7 @@ export async function runHybridDocumentAnalysis(
 
       const shouldProbeTokens =
         options.policyMode === 'only_on_device' ||
-        (chunked.chunkCount > 1 && options.policyMode !== 'only_in_cloud');
+        (activeChunked.chunkCount > 1 && options.policyMode !== 'only_in_cloud');
 
       const tokenProbe = shouldProbeTokens
         ? await probeTokenBudget(model, firstRequest, redaction.redactedText)
@@ -1097,8 +1100,13 @@ export async function runHybridDocumentAnalysis(
           };
       chunkInfo = {
         ...chunkInfo,
+        chunkCount: activeChunked.chunkCount,
+        wasChunked: activeChunked.wasChunked,
+        wasTruncated: activeChunked.wasTruncated,
         estimatedTokens:
-          chunked.chunkCount === 1 ? tokenProbe.tokens : chunked.estimatedTokens,
+          activeChunked.chunkCount === 1
+            ? tokenProbe.tokens
+            : activeChunked.estimatedTokens,
         tokenProbeSource: tokenProbe.source
       };
 
@@ -1117,9 +1125,9 @@ export async function runHybridDocumentAnalysis(
         const prompt =
           i === 0
             ? firstPrompt
-            : buildTriagePrompt(chunked.chunks[i], {
+            : buildTriagePrompt(activeChunked.chunks[i], {
                 index: i,
-                total: chunked.chunkCount,
+                total: activeChunked.chunkCount,
                 compactForNano
               });
         const request =
@@ -1154,26 +1162,26 @@ export async function runHybridDocumentAnalysis(
         }
 
         return {
-          analysis: parseStructuredAnalysis(rawOutput, chunked.chunks[i]),
+          analysis: parseStructuredAnalysis(rawOutput, activeChunked.chunks[i]),
           source: normalizeInferenceSource(response.inferenceSource)
         };
       };
 
       const chunkSources = new Set<'on_device' | 'in_cloud'>();
       if (
-        chunked.chunkCount > 1 &&
+        activeChunked.chunkCount > 1 &&
         (options.policyMode === 'only_in_cloud' ||
           options.policyMode === 'prefer_in_cloud')
       ) {
         const concurrentResults = await Promise.all(
-          chunked.chunks.map((_, i) => runChunk(i))
+          activeChunked.chunks.map((_, i) => runChunk(i))
         );
         for (const item of concurrentResults) {
           chunkResults.push(item.analysis);
           chunkSources.add(item.source);
         }
       } else {
-        for (let i = 0; i < chunked.chunks.length; i += 1) {
+        for (let i = 0; i < activeChunked.chunks.length; i += 1) {
           const item = await runChunk(i);
           chunkResults.push(item.analysis);
           chunkSources.add(item.source);
@@ -1186,7 +1194,7 @@ export async function runHybridDocumentAnalysis(
         );
       }
 
-      triage = mergeChunkAnalyses(chunkResults);
+      const stage1Triage = mergeChunkAnalyses(chunkResults);
       const tokenStats = hasUsageMetadata
         ? {
             promptTokens: totalPromptTokens,
@@ -1203,7 +1211,7 @@ export async function runHybridDocumentAnalysis(
             ? `Cloud inference was unavailable or offline; Firebase AI Logic fell back to on-device execution.`
             : undefined;
 
-      triageTelemetry = {
+      const stage1Telemetry: RunTelemetry = {
         stage: 'triage',
         badge: resolveBadgeFromSource('triage', resolvedSource),
         requestedMode: options.policyMode,
@@ -1222,6 +1230,42 @@ export async function runHybridDocumentAnalysis(
         wasChunked: chunkInfo.wasChunked,
         timestamp: new Date().toISOString()
       };
+
+      return { triage: stage1Triage, triageTelemetry: stage1Telemetry };
+    };
+
+    try {
+      let stage1Result: {
+        triage: DocumentAnalysisResult;
+        triageTelemetry: RunTelemetry;
+      };
+      try {
+        stage1Result = await executeStage1('document_analysis', chunked);
+      } catch (firstErr) {
+        const firstMsg =
+          firstErr instanceof Error ? firstErr.message : String(firstErr);
+        if (
+          !isAbortError(firstErr) &&
+          /input is too large|quota/i.test(firstMsg)
+        ) {
+          const liteChunked = chunkDocumentText(
+            redaction.redactedText,
+            1200,
+            options.maxChunks ?? DEFAULT_MAX_CHUNKS
+          );
+          notes.push(
+            'Stage 1 on-device Nano hit input/quota limit; retried with unconstrained JSON schema (document_analysis_nano_lite) and 1,200-char chunks.'
+          );
+          stage1Result = await executeStage1(
+            'document_analysis_nano_lite',
+            liteChunked
+          );
+        } else {
+          throw firstErr;
+        }
+      }
+      triage = stage1Result.triage;
+      triageTelemetry = stage1Result.triageTelemetry;
     } catch (err) {
       if (isAbortError(err) || options.policyMode === 'only_on_device') {
         throw err;

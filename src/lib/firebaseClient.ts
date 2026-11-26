@@ -40,6 +40,7 @@ declare global {
 export type AppCheckProviderKind = 'recaptcha-enterprise' | 'recaptcha-v3';
 export type ModelSchemaKey =
   | 'document_analysis'
+  | 'document_analysis_nano_lite'
   | 'semantic_pii'
   | 'negotiation_chat';
 
@@ -390,17 +391,27 @@ function buildHybridParams(
   }
 
   const sdkMode = mapPolicyToSdkInferenceMode(mode);
+  const onDeviceParams: HybridParams['onDeviceParams'] =
+    schemaKey === 'document_analysis_nano_lite'
+      ? {
+          createOptions: {
+            expectedInputs: [{ type: 'text', languages: ['en'] }],
+            expectedOutputs: [{ type: 'text', languages: ['en'] }]
+          }
+        }
+      : {
+          createOptions: {
+            expectedInputs: [{ type: 'text', languages: ['en'] }],
+            expectedOutputs: [{ type: 'text', languages: ['en'] }]
+          },
+          promptOptions: {
+            responseConstraint: ON_DEVICE_JSON_CONSTRAINT
+          }
+        };
+
   return {
     mode: sdkMode,
-    onDeviceParams: {
-      createOptions: {
-        expectedInputs: [{ type: 'text', languages: ['en'] }],
-        expectedOutputs: [{ type: 'text', languages: ['en'] }]
-      },
-      promptOptions: {
-        responseConstraint: ON_DEVICE_JSON_CONSTRAINT
-      }
-    },
+    onDeviceParams,
     ...(mode === 'only_on_device'
       ? {}
       : {
