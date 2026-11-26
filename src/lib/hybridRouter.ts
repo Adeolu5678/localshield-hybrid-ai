@@ -380,20 +380,35 @@ export function buildSemanticPiiPrompt(redactedText: string): string {
 
 export function buildTriagePrompt(
   redactedText: string,
-  chunkMeta?: { index: number; total: number }
+  chunkMeta?: { index: number; total: number; compactForNano?: boolean }
 ): string {
   const chunkLine =
     chunkMeta && chunkMeta.total > 1
       ? `SECTION CHUNK ${chunkMeta.index + 1} OF ${chunkMeta.total}:`
       : 'DOCUMENT (PII-REDACTED):';
-  const cuadHints = extractCuadHints(redactedText);
+  const sourceText = chunkMeta?.compactForNano
+    ? redactedText.slice(0, 3500)
+    : redactedText;
+  const cuadHints = extractCuadHints(sourceText);
   const cuadHintsLine =
     cuadHints.length > 0 ? `[CUAD_HINTS: ${cuadHints.join(', ')}]` : null;
-  const definedTerms = extractDefinedTerms(redactedText, 10);
+  const definedTerms = extractDefinedTerms(sourceText, 10);
   const definedTermsLine =
     definedTerms.length > 0
       ? `[DEFINED_TERMS: ${definedTerms.join(', ')}]`
       : null;
+
+  if (chunkMeta?.compactForNano) {
+    return [
+      'LocalShield contract risk analyzer. Return ONLY valid JSON matching the schema.',
+      'Flag high-risk clauses: uncapped indemnity, perpetual IP/AI license, auto-renewal, MFN, anti-assignment, URL modification, liquidated damages, arbitration/class waiver, non-compete, >72h breach notice.',
+      'For each clause: exact verbatim excerpt, concrete rationale, drop-in redlineProposal, severity (critical/high/medium/low).',
+      ...(cuadHintsLine ? [cuadHintsLine] : []),
+      ...(definedTermsLine ? [definedTermsLine] : []),
+      chunkLine,
+      sourceText
+    ].join('\n');
+  }
 
   return [
     'You are LocalShield, an adversarial privacy-first contract and policy risk analyzer representing the reviewing/receiving party against drafter-favorable terms.',
@@ -1057,9 +1072,13 @@ export async function runHybridDocumentAnalysis(
   if (options.modelFactory && !options.useSimulatedSandbox) {
     try {
       const model = options.modelFactory(options.policyMode, 'document_analysis');
+      const compactForNano =
+        options.chromeNanoAvailability === 'available' &&
+        options.policyMode !== 'only_in_cloud';
       const firstPrompt = buildTriagePrompt(chunked.chunks[0], {
         index: 0,
-        total: chunked.chunkCount
+        total: chunked.chunkCount,
+        compactForNano
       });
       const firstRequest = buildMultimodalContentParts(
         firstPrompt,
@@ -1100,7 +1119,8 @@ export async function runHybridDocumentAnalysis(
             ? firstPrompt
             : buildTriagePrompt(chunked.chunks[i], {
                 index: i,
-                total: chunked.chunkCount
+                total: chunked.chunkCount,
+                compactForNano
               });
         const request =
           i === 0
