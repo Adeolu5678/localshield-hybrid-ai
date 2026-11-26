@@ -1250,11 +1250,11 @@ export async function runHybridDocumentAnalysis(
         ) {
           const liteChunked = chunkDocumentText(
             redaction.redactedText,
-            1200,
-            options.maxChunks ?? DEFAULT_MAX_CHUNKS
+            500,
+            options.maxChunks ?? 12
           );
           notes.push(
-            'Stage 1 on-device Nano hit input/quota limit; retried with unconstrained JSON schema (document_analysis_nano_lite) and 1,200-char chunks.'
+            'Stage 1 on-device Nano hit input/quota limit; retried with unconstrained JSON schema (document_analysis_nano_lite) and 500-char micro-batches.'
           );
           stage1Result = await executeStage1(
             'document_analysis_nano_lite',
