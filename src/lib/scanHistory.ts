@@ -25,6 +25,7 @@ export interface ScanHistoryRecord {
   clauses: RiskClause[];
   documentType?: string;
   complianceFlags?: string[];
+  crossClauseFindings?: DocumentAnalysisResult['crossClauseFindings'];
 }
 
 const memoryStore = new Map<string, ScanHistoryRecord>();
@@ -33,33 +34,41 @@ function hasIndexedDb(): boolean {
   return typeof indexedDB !== 'undefined' && indexedDB !== null;
 }
 
-function scrubText(value: string): string {
+function scrubText(value: string, customTerms?: string[]): string {
   if (!value) return '';
-  return redactDocument(value).redactedText;
+  return redactDocument(value, customTerms ? { customTerms } : undefined)
+    .redactedText;
 }
 
-function sanitizeClause(clause: RiskClause): RiskClause {
+function sanitizeClause(
+  clause: RiskClause,
+  customTerms?: string[]
+): RiskClause {
   return {
     id: clause.id,
-    title: scrubText(clause.title),
+    title: scrubText(clause.title, customTerms),
     category: clause.category,
     severity: clause.severity,
-    excerpt: scrubText(clause.excerpt),
-    rationale: scrubText(clause.rationale),
-    redlineProposal: scrubText(clause.redlineProposal)
+    excerpt: scrubText(clause.excerpt, customTerms),
+    rationale: scrubText(clause.rationale, customTerms),
+    redlineProposal: scrubText(clause.redlineProposal, customTerms)
   };
 }
 
 export function sanitizeScanRecord(
-  record: ScanHistoryRecord
+  record: ScanHistoryRecord,
+  customTerms?: string[]
 ): ScanHistoryRecord {
   const sanitizedClauses = Array.isArray(record.clauses)
-    ? record.clauses.map(sanitizeClause)
+    ? record.clauses.map((c) => sanitizeClause(c, customTerms))
     : [];
 
   return {
     id: record.id,
-    title: scrubText(record.title || 'Untitled Scan').slice(0, 140),
+    title: scrubText(record.title || 'Untitled Scan', customTerms).slice(
+      0,
+      140
+    ),
     savedAt: record.savedAt || new Date().toISOString(),
     riskScore: Number.isFinite(record.riskScore)
       ? Math.max(0, Math.min(100, Math.round(record.riskScore)))
@@ -68,14 +77,22 @@ export function sanitizeScanRecord(
     routeLabel: record.routeLabel || 'LOCAL HEURISTIC',
     piiCount: Math.max(0, Math.round(record.piiCount || 0)),
     clauseCount: sanitizedClauses.length,
-    redactedText: scrubText(record.redactedText),
-    reportSummary: scrubText(record.reportSummary),
+    redactedText: scrubText(record.redactedText, customTerms),
+    reportSummary: scrubText(record.reportSummary, customTerms),
     clauses: sanitizedClauses,
+    crossClauseFindings: Array.isArray(record.crossClauseFindings)
+      ? record.crossClauseFindings.map((f) => ({
+          ...f,
+          title: scrubText(f.title, customTerms),
+          impact: scrubText(f.impact, customTerms),
+          negotiationMove: scrubText(f.negotiationMove, customTerms)
+        }))
+      : undefined,
     documentType: record.documentType
-      ? scrubText(record.documentType)
+      ? scrubText(record.documentType, customTerms)
       : undefined,
     complianceFlags: Array.isArray(record.complianceFlags)
-      ? record.complianceFlags.map((flag) => scrubText(flag))
+      ? record.complianceFlags.map((flag) => scrubText(flag, customTerms))
       : undefined
   };
 }
@@ -102,28 +119,33 @@ function createRecordId(): string {
 
 export function buildScanHistoryRecord(
   title: string,
-  report: HybridExecutionReport
+  report: HybridExecutionReport,
+  customTerms?: string[]
 ): ScanHistoryRecord {
   const activeAnalysis = report.escalation ?? report.triage;
   const routeLabel = report.escalationTelemetry
     ? `${report.triageTelemetry.badge} → ${report.escalationTelemetry.badge}`
     : report.triageTelemetry.badge;
 
-  return sanitizeScanRecord({
-    id: createRecordId(),
-    title: title.trim() || activeAnalysis.documentType || 'Untitled Scan',
-    savedAt: new Date().toISOString(),
-    riskScore: activeAnalysis.overallRiskScore,
-    riskLabel: activeAnalysis.riskPosture,
-    routeLabel,
-    piiCount: report.redaction.totalMasked,
-    clauseCount: activeAnalysis.clauses.length,
-    redactedText: report.redaction.redactedText,
-    reportSummary: activeAnalysis.executiveSummary,
-    clauses: activeAnalysis.clauses,
-    documentType: activeAnalysis.documentType,
-    complianceFlags: activeAnalysis.complianceFlags
-  });
+  return sanitizeScanRecord(
+    {
+      id: createRecordId(),
+      title: title.trim() || activeAnalysis.documentType || 'Untitled Scan',
+      savedAt: new Date().toISOString(),
+      riskScore: activeAnalysis.overallRiskScore,
+      riskLabel: activeAnalysis.riskPosture,
+      routeLabel,
+      piiCount: report.redaction.totalMasked,
+      clauseCount: activeAnalysis.clauses.length,
+      redactedText: report.redaction.redactedText,
+      reportSummary: activeAnalysis.executiveSummary,
+      clauses: activeAnalysis.clauses,
+      crossClauseFindings: activeAnalysis.crossClauseFindings,
+      documentType: activeAnalysis.documentType,
+      complianceFlags: activeAnalysis.complianceFlags
+    },
+    customTerms
+  );
 }
 
 function emptyPiiCounts(): Record<PiiCategory, number> {
@@ -131,6 +153,7 @@ function emptyPiiCounts(): Record<PiiCategory, number> {
     API_SECRET: 0,
     AWS_KEY: 0,
     JWT: 0,
+    PEM_KEY: 0,
     SSN: 0,
     EIN: 0,
     CARD: 0,
@@ -138,6 +161,7 @@ function emptyPiiCounts(): Record<PiiCategory, number> {
     EMAIL: 0,
     PHONE: 0,
     IPV4: 0,
+    IPV6: 0,
     ADDRESS: 0,
     CUSTOM: 0,
     PERSON: 0,
@@ -155,7 +179,7 @@ export function reconstructReportFromHistory(
     riskPosture: record.riskLabel,
     executiveSummary: record.reportSummary,
     clauses: record.clauses,
-    crossClauseFindings: [],
+    crossClauseFindings: record.crossClauseFindings ?? [],
     complianceFlags: record.complianceFlags ?? []
   };
 
@@ -200,8 +224,13 @@ export function reconstructReportFromHistory(
   };
 }
 
+let cachedDbPromise: Promise<IDBDatabase> | null = null;
+
 function openHistoryDb(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
+  if (cachedDbPromise) {
+    return cachedDbPromise;
+  }
+  cachedDbPromise = new Promise((resolve, reject) => {
     const request = indexedDB.open(HISTORY_DB_NAME, HISTORY_DB_VERSION);
 
     request.onupgradeneeded = () => {
@@ -214,10 +243,23 @@ function openHistoryDb(): Promise<IDBDatabase> {
       }
     };
 
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () =>
+    request.onsuccess = () => {
+      const db = request.result;
+      db.onclose = () => {
+        cachedDbPromise = null;
+      };
+      db.onversionchange = () => {
+        db.close();
+        cachedDbPromise = null;
+      };
+      resolve(db);
+    };
+    request.onerror = () => {
+      cachedDbPromise = null;
       reject(request.error ?? new Error('Failed to open IndexedDB history.'));
+    };
   });
+  return cachedDbPromise;
 }
 
 function runIdbTransaction<T>(
@@ -265,31 +307,27 @@ export async function saveScanRecord(
 
   try {
     const db = await openHistoryDb();
-    try {
-      await runIdbTransaction(db, 'readwrite', (store) => store.put(sanitized));
-      const all = await runIdbTransaction<ScanHistoryRecord[]>(
-        db,
-        'readonly',
-        (store) => store.getAll()
-      );
-      if (all.length > MAX_HISTORY_RECORDS) {
-        const sorted = sortNewestFirst(all);
-        const overflow = sorted.slice(MAX_HISTORY_RECORDS);
-        await new Promise<void>((resolve, reject) => {
-          const tx = db.transaction(HISTORY_STORE_NAME, 'readwrite');
-          const store = tx.objectStore(HISTORY_STORE_NAME);
-          for (const item of overflow) {
-            store.delete(item.id);
-          }
-          tx.oncomplete = () => resolve();
-          tx.onerror = () =>
-            reject(tx.error ?? new Error('Failed to prune scan history.'));
-        });
-      }
-      return sanitized;
-    } finally {
-      db.close();
+    await runIdbTransaction(db, 'readwrite', (store) => store.put(sanitized));
+    const all = await runIdbTransaction<ScanHistoryRecord[]>(
+      db,
+      'readonly',
+      (store) => store.getAll()
+    );
+    if (all.length > MAX_HISTORY_RECORDS) {
+      const sorted = sortNewestFirst(all);
+      const overflow = sorted.slice(MAX_HISTORY_RECORDS);
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction(HISTORY_STORE_NAME, 'readwrite');
+        const store = tx.objectStore(HISTORY_STORE_NAME);
+        for (const item of overflow) {
+          store.delete(item.id);
+        }
+        tx.oncomplete = () => resolve();
+        tx.onerror = () =>
+          reject(tx.error ?? new Error('Failed to prune scan history.'));
+      });
     }
+    return sanitized;
   } catch {
     memoryStore.set(sanitized.id, sanitized);
     pruneMemoryStore();
@@ -311,16 +349,12 @@ export async function listScanRecords(
 
   try {
     const db = await openHistoryDb();
-    try {
-      const all = await runIdbTransaction<ScanHistoryRecord[]>(
-        db,
-        'readonly',
-        (store) => store.getAll()
-      );
-      return sortNewestFirst(all).slice(0, safeLimit);
-    } finally {
-      db.close();
-    }
+    const all = await runIdbTransaction<ScanHistoryRecord[]>(
+      db,
+      'readonly',
+      (store) => store.getAll()
+    );
+    return sortNewestFirst(all).slice(0, safeLimit);
   } catch {
     return sortNewestFirst(Array.from(memoryStore.values())).slice(
       0,
@@ -338,11 +372,7 @@ export async function deleteScanRecord(id: string): Promise<void> {
 
   try {
     const db = await openHistoryDb();
-    try {
-      await runIdbTransaction(db, 'readwrite', (store) => store.delete(id));
-    } finally {
-      db.close();
-    }
+    await runIdbTransaction(db, 'readwrite', (store) => store.delete(id));
   } catch {
     // Fallback already deleted from memoryStore.
   }
@@ -357,11 +387,7 @@ export async function clearScanHistory(): Promise<void> {
 
   try {
     const db = await openHistoryDb();
-    try {
-      await runIdbTransaction(db, 'readwrite', (store) => store.clear());
-    } finally {
-      db.close();
-    }
+    await runIdbTransaction(db, 'readwrite', (store) => store.clear());
   } catch {
     // Fallback already cleared memoryStore.
   }

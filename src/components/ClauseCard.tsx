@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ClauseRedlineDecision } from '../lib/redlineDiff';
 import type { RiskClause } from '../types/analysis';
 import type { ClauseDeltaBadge } from './HybridDeltaPanel';
@@ -34,6 +34,20 @@ export function ClauseCard({
       ? decision.customRedline
       : clause.redlineProposal;
   const [draftRedline, setDraftRedline] = useState(effectiveRedline);
+  const copyTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    setIsEditing(false);
+    setDraftRedline(effectiveRedline);
+  }, [clause.id]);
+
+  useEffect(() => {
+    return () => {
+      if (copyTimerRef.current !== null) {
+        window.clearTimeout(copyTimerRef.current);
+      }
+    };
+  }, []);
 
   const status = decision?.status ?? 'pending';
   const isDecided = status === 'accepted' || status === 'rejected';
@@ -42,7 +56,13 @@ export function ClauseCard({
     try {
       await navigator.clipboard.writeText(effectiveRedline);
       setCopied(true);
-      setTimeout(() => setCopied(false), 1600);
+      if (copyTimerRef.current !== null) {
+        window.clearTimeout(copyTimerRef.current);
+      }
+      copyTimerRef.current = window.setTimeout(() => {
+        setCopied(false);
+        copyTimerRef.current = null;
+      }, 1600);
     } catch {
       setCopied(false);
     }

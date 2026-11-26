@@ -86,4 +86,16 @@ describe('documentExporter', () => {
     const header = new TextDecoder('ascii').decode(bytes.slice(0, 5));
     expect(header).toBe('%PDF-');
   });
+
+  it('wraps ultra-long URLs in PDF export without throwing', async () => {
+    const longUrl = 'https://example.com/' + 'a'.repeat(160);
+    const result = await exportEditedDocument({
+      originalFilename: 'Terms.pdf',
+      compiledText: `See terms at ${longUrl} for details.`,
+      replacements: []
+    });
+
+    expect(result.mimeType).toBe('application/pdf');
+    expect(result.blob.size).toBeGreaterThan(0);
+  });
 });

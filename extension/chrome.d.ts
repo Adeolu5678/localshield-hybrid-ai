@@ -33,5 +33,15 @@ declare namespace chrome {
     const onInstalled: {
       addListener: (callback: () => void) => void;
     };
+    const onStartup: {
+      addListener: (callback: () => void) => void;
+    };
+  }
+
+  namespace storage {
+    const local: {
+      get: (keys: string[]) => Promise<Record<string, unknown>>;
+      set: (items: Record<string, unknown>) => Promise<void>;
+    };
   }
 }

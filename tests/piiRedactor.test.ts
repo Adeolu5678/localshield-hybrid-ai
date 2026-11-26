@@ -159,9 +159,64 @@ describe('redactSensitiveData', () => {
     expect(restoreFromVault(result.redactedText, result.vault)).toBe(sample);
   });
 
+  it('normalizes email casing so Alice@Example.com and alice@example.com share one token', () => {
+    const sample = 'From: Alice@Example.com; Reply-To: alice@example.com.';
+    const result = redactSensitiveData(sample);
+
+    expect(result.countsByCategory.EMAIL).toBe(1);
+    expect(result.totalMasked).toBe(2);
+    expect(result.redactedText).toBe(
+      'From: [EMAIL_1]; Reply-To: [EMAIL_1].'
+    );
+  });
+
   it('estimates token count deterministically', () => {
     expect(estimateTokenCount('')).toBe(0);
     expect(estimateTokenCount('abcd')).toBe(1);
     expect(estimateTokenCount('abcdefgh')).toBe(2);
+  });
+
+  it('masks PEM private keys and IPv6 addresses deterministically', () => {
+    const pemKey = [
+      '-----BEGIN RSA PRIVATE KEY-----',
+      'MIIEpAIBAAKCAQEA0Z3VS5JJcds3xfn/ygWyF8PbnGy0AHB7M',
+      '-----END RSA PRIVATE KEY-----'
+    ].join('\n');
+    const sample = `Host: 2001:0db8:85a3:0000:0000:8a2e:0370:7334 and loopback ::1.\n${pemKey}`;
+    const result = redactSensitiveData(sample);
+
+    expect(result.countsByCategory.PEM_KEY).toBe(1);
+    expect(result.countsByCategory.IPV6).toBe(2);
+    expect(result.redactedText).toContain('[PEM_KEY_1]');
+    expect(result.redactedText).toContain('[IPV6_1]');
+    expect(result.redactedText).toContain('[IPV6_2]');
+    expect(result.redactedText).not.toContain('BEGIN RSA PRIVATE KEY');
+    expect(result.redactedText).not.toContain('2001:0db8:85a3');
+    expect(restoreFromVault(result.redactedText, result.vault)).toBe(sample);
+  });
+
+  it('resolves overlapping matches using longest-match-first', () => {
+    const sample = 'Bearer sk-live-9f8a7b6c5d4e3f2a1b0c9d8e';
+    const result = redactSensitiveData(sample);
+
+    expect(result.countsByCategory.API_SECRET).toBe(1);
+    expect(result.redactedText).toBe('[API_SECRET_1]');
+    expect(restoreFromVault(result.redactedText, result.vault)).toBe(sample);
+  });
+
+  it('redacts PGP private key blocks, IPv6 addresses, and rejects invalid IBAN checksums', () => {
+    const pgp =
+      '-----BEGIN PGP PRIVATE KEY BLOCK-----\nABC123\n-----END PGP PRIVATE KEY BLOCK-----';
+    const ipv6 = '2001:0db8:85a3:0000:0000:8a2e:0370:7334';
+    const invalidIban = 'US12ABCDEF1234567890';
+    const sample = `${pgp}\nServer: ${ipv6}\nDocket: ${invalidIban}`;
+    const result = redactSensitiveData(sample);
+
+    expect(result.countsByCategory.PEM_KEY).toBe(1);
+    expect(result.countsByCategory.IPV6).toBe(1);
+    expect(result.countsByCategory.IBAN).toBe(0);
+    expect(result.redactedText).toContain('[PEM_KEY_1]');
+    expect(result.redactedText).toContain('[IPV6_1]');
+    expect(result.redactedText).toContain(invalidIban);
   });
 });

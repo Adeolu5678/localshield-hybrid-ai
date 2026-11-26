@@ -112,6 +112,17 @@ export function ClauseNegotiationDrawer({
     modelFactory
   ]);
 
+  useEffect(() => {
+    if (!clause) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [clause, onClose]);
+
   if (!clause) return null;
 
   const effectiveMode = negotiatorRef.current?.effectiveMode ?? policyMode;
@@ -152,6 +163,11 @@ export function ClauseNegotiationDrawer({
             : 'Negotiation turn failed.'
         );
       }
+      if (negotiatorRef.current) {
+        setMessages(negotiatorRef.current.getHistory());
+      } else {
+        setMessages((prev) => prev.filter((m) => m !== optimisticUser));
+      }
     } finally {
       setIsSending(false);
       setStreamingText('');
@@ -168,6 +184,11 @@ export function ClauseNegotiationDrawer({
   return (
     <div
       className="drawer-backdrop"
+      onClick={(event) => {
+        if (event.target === event.currentTarget) {
+          onClose();
+        }
+      }}
       role="dialog"
       aria-modal="true"
       aria-label={`Negotiate ${clause.title}`}

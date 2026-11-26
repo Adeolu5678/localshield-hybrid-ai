@@ -49,4 +49,13 @@ describe('documentIngestor (100% offline)', () => {
       /Unsupported file type "archive\.zip"/
     );
   });
+
+  it('rejects files exceeding the 25 MB client-side limit', async () => {
+    const bigFile = new File(['x'], 'huge.txt', { type: 'text/plain' });
+    Object.defineProperty(bigFile, 'size', { value: 26 * 1024 * 1024 });
+
+    await expect(ingestUploadedFile(bigFile)).rejects.toThrow(
+      /exceeds the 25 MB client-side limit/
+    );
+  });
 });

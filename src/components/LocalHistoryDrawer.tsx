@@ -83,7 +83,15 @@ export function LocalHistoryDrawer({
               <button
                 type="button"
                 className="btn-danger-outline btn-xs"
-                onClick={onClearAll}
+                onClick={() => {
+                  if (
+                    window.confirm(
+                      'Clear all saved local scan history? This cannot be undone.'
+                    )
+                  ) {
+                    onClearAll();
+                  }
+                }}
               >
                 Clear All History
               </button>

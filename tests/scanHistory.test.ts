@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
+  buildScanHistoryRecord,
   clearScanHistory,
   deleteScanRecord,
   listScanRecords,
@@ -152,5 +153,65 @@ describe('scanHistory (local-only redacted storage)', () => {
     expect(persisted).not.toContain(rawPhone);
     expect(persisted).toContain('[EMAIL_1]');
     expect(persisted).toContain('[SSN_1]');
+  });
+
+  it('preserves crossClauseFindings in buildScanHistoryRecord', () => {
+    const record = buildScanHistoryRecord('Cross-Clause Test', {
+      redaction: {
+        originalText: 'test',
+        redactedText: 'test',
+        matches: [],
+        vault: {},
+        countsByCategory: {} as never,
+        totalMasked: 0
+      },
+      semanticPii: { status: 'skipped', entitiesAdded: 0, latencyMs: 0 },
+      triage: {
+        documentType: 'MSA',
+        overallRiskScore: 70,
+        riskPosture: 'Elevated',
+        executiveSummary: 'Summary',
+        clauses: [],
+        crossClauseFindings: [
+          {
+            id: 'cross-1',
+            title: 'AI + Liability',
+            involvedClauses: ['h-ai-training', 'h-liability'],
+            impact: 'Compound exposure.',
+            negotiationMove: 'Carve out IP.'
+          }
+        ],
+        complianceFlags: []
+      },
+      escalation: null,
+      triageTelemetry: {
+        stage: 'triage',
+        badge: 'LOCAL HEURISTIC',
+        requestedMode: 'prefer_on_device',
+        inferenceSource: 'local_heuristic',
+        modelName: 'Local',
+        latencyMs: 1,
+        promptTokens: 1,
+        candidateTokens: 1,
+        totalTokens: 2,
+        tokenCountSource: 'estimated',
+        piiMaskedBeforeInference: 0,
+        streamed: false,
+        timestamp: new Date().toISOString()
+      },
+      escalationTelemetry: null,
+      delta: {
+        newClausesCount: 0,
+        upgradedSeverityCount: 0,
+        newCrossClauseCount: 0,
+        riskScoreDelta: 0,
+        totalLatencyMs: 1,
+        combinedTokens: 2
+      },
+      notes: []
+    });
+
+    expect(record.crossClauseFindings).toHaveLength(1);
+    expect(record.crossClauseFindings?.[0].title).toBe('AI + Liability');
   });
 });

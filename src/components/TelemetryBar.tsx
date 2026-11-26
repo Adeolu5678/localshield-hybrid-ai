@@ -113,7 +113,9 @@ export function TelemetryBar({
 
   const hasBothStages = Boolean(triageTelemetry && escalationTelemetry);
   const combinedLatencyMs =
-    (triageTelemetry?.latencyMs ?? 0) + (escalationTelemetry?.latencyMs ?? 0);
+    (semanticPii?.latencyMs ?? 0) +
+    (triageTelemetry?.latencyMs ?? 0) +
+    (escalationTelemetry?.latencyMs ?? 0);
   const combinedTokens =
     (triageTelemetry?.totalTokens ?? 0) +
     (escalationTelemetry?.totalTokens ?? 0);

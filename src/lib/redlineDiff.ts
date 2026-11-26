@@ -156,6 +156,10 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+/**
+ * Replaces the first matching occurrence of `excerpt` in `source` with `replacement`
+ * (single-occurrence replacement using exact, flexible-whitespace, or 5-word anchor matching).
+ */
 function replaceExcerptInText(
   source: string,
   excerpt: string,
@@ -177,21 +181,52 @@ function replaceExcerptInText(
     };
   }
 
-  // Fallback: match with flexible whitespace and case-insensitivity
-  const flexPattern = cleanExcerpt
-    .split(/\s+/)
-    .map((part) => escapeRegExp(part))
-    .join('\\s+');
-  const flexRe = new RegExp(flexPattern, 'i');
-  const flexMatch = flexRe.exec(source);
-  if (flexMatch && typeof flexMatch.index === 'number') {
-    return {
-      updated:
-        source.slice(0, flexMatch.index) +
-        replacement +
-        source.slice(flexMatch.index + flexMatch[0].length),
-      matched: true
-    };
+  // Fallback: match with flexible whitespace and case-insensitivity (capped to avoid massive regexes)
+  const flexWords = cleanExcerpt.split(/\s+/).filter(Boolean);
+  if (flexWords.length > 0 && flexWords.length <= 80) {
+    try {
+      const flexPattern = flexWords.map((part) => escapeRegExp(part)).join('\\s+');
+      const flexRe = new RegExp(flexPattern, 'i');
+      const flexMatch = flexRe.exec(source);
+      if (flexMatch && typeof flexMatch.index === 'number') {
+        return {
+          updated:
+            source.slice(0, flexMatch.index) +
+            replacement +
+            source.slice(flexMatch.index + flexMatch[0].length),
+          matched: true
+        };
+      }
+    } catch {
+      // Fall through to 3rd-tier anchor match
+    }
+  }
+
+  // 3rd-tier fallback: anchor match using first 5 words and last 5 words within <= 1200 chars
+  const words = cleanExcerpt.split(/\s+/).filter(Boolean);
+  if (words.length >= 6) {
+    const startPattern = words.slice(0, 5).map(escapeRegExp).join('\\s+');
+    const endPattern = words.slice(-5).map(escapeRegExp).join('\\s+');
+    const startRe = new RegExp(startPattern, 'i');
+    const startMatch = startRe.exec(source);
+    if (startMatch && typeof startMatch.index === 'number') {
+      const searchFrom = startMatch.index + startMatch[0].length;
+      const tail = source.slice(searchFrom);
+      const endRe = new RegExp(endPattern, 'i');
+      const endMatch = endRe.exec(tail);
+      if (endMatch && typeof endMatch.index === 'number') {
+        const spanEnd = searchFrom + endMatch.index + endMatch[0].length;
+        if (spanEnd - startMatch.index <= 1200) {
+          return {
+            updated:
+              source.slice(0, startMatch.index) +
+              replacement +
+              source.slice(spanEnd),
+            matched: true
+          };
+        }
+      }
+    }
   }
 
   return { updated: source, matched: false };

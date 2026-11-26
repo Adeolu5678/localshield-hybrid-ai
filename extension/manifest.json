@@ -4,7 +4,10 @@
   "short_name": "LegalEase",
   "version": "1.0.0",
   "description": "Audit Terms of Service, Privacy Policies, and contracts beside any tab with local PII redaction and Firebase AI Logic hybrid inference.",
-  "permissions": ["sidePanel", "activeTab", "scripting"],
+  "permissions": ["sidePanel", "activeTab", "scripting", "storage"],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self';"
+  },
   "side_panel": {
     "default_path": "sidepanel.html"
   },

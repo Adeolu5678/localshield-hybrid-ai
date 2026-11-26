@@ -15,3 +15,9 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onInstalled) {
     configureSidePanelBehavior();
   });
 }
+
+if (typeof chrome !== 'undefined' && chrome.runtime?.onStartup) {
+  chrome.runtime.onStartup.addListener(() => {
+    configureSidePanelBehavior();
+  });
+}

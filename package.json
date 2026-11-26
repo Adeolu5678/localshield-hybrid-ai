@@ -1,13 +1,13 @@
 {
-  "name": "localshield-hybrid-doc-brief",
+  "name": "legalease-hybrid-doc-brief",
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Offline-first private contract, privacy policy, and technical document risk analyzer built with Firebase AI Logic hybrid inference (Gemini Nano on-device + Cloud Gemini fallback) and App Check.",
+  "description": "LegalEase — Offline-first private contract, privacy policy, and technical document risk analyzer built with Firebase AI Logic hybrid inference (Gemini Nano on-device + Cloud Gemini fallback) and App Check.",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "build:extension": "vite build --config vite.extension.config.ts",
+    "build:extension": "tsc --noEmit && vite build --config vite.extension.config.ts",
     "preview": "vite preview",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"

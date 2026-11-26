@@ -56,4 +56,33 @@ Done.`;
     expect(clean.riskPosture).toBe('Low');
     expect(clean.overallRiskScore).toBeLessThan(25);
   });
+
+  it('captures multiple non-overlapping matches per heuristic rule up to 3', () => {
+    const doc = [
+      'Section 1: Vendor has a cap of $100.',
+      'Section 2: In addition, aggregate liability shall not exceed $100.',
+      'Section 3: For any other claim, Customer has unlimited liability.',
+      'Section 4: Furthermore, Vendor is solely liable for all damages.'
+    ].join(' ');
+    const result = analyzeDocumentHeuristically(doc);
+    const liabilityClauses = result.clauses.filter((c) =>
+      c.id.startsWith('h-liability')
+    );
+    expect(liabilityClauses).toHaveLength(3);
+    expect(liabilityClauses.map((c) => c.id)).toEqual([
+      'h-liability',
+      'h-liability-2',
+      'h-liability-3'
+    ]);
+  });
+
+  it('does not truncate heuristic excerpts on legal abbreviations like Inc. or U.S.', () => {
+    const text =
+      'Acme Inc. agrees that Vendor may use Customer Data to train AI models under U.S. law.';
+    const result = analyzeDocumentHeuristically(text);
+    const aiClause = result.clauses.find((c) => c.id === 'h-ai-training');
+    expect(aiClause).toBeDefined();
+    expect(aiClause!.excerpt).toContain('Acme Inc.');
+    expect(aiClause!.excerpt).toContain('U.S. law.');
+  });
 });

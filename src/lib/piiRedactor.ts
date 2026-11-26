@@ -46,6 +46,35 @@ function isValidPhoneMatch(candidate: string): boolean {
   return digits.length === 10 || (digits.length === 11 && digits.startsWith('1'));
 }
 
+const INVALID_EIN_PREFIXES = new Set([
+  '00', '07', '08', '09', '17', '18', '19', '28', '29',
+  '49', '69', '70', '78', '79', '89', '96', '97'
+]);
+
+function isValidEinMatch(value: string): boolean {
+  return !INVALID_EIN_PREFIXES.has(value.slice(0, 2));
+}
+
+/**
+ * Validates IBAN strings using ISO 7064 mod-97 checksum so patent, docket, or
+ * tracking IDs that happen to match `[A-Z]{2}\d{2}[A-Z0-9]{11,30}` do not false-positive.
+ */
+export function isValidIban(candidate: string): boolean {
+  const cleaned = candidate.replace(/\s+/g, '').toUpperCase();
+  if (!/^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$/.test(cleaned)) return false;
+
+  const rearranged = cleaned.slice(4) + cleaned.slice(0, 4);
+  let remainder = 0;
+  for (let i = 0; i < rearranged.length; i += 1) {
+    const code = rearranged.charCodeAt(i);
+    const digits = code >= 65 && code <= 90 ? String(code - 55) : rearranged[i];
+    for (let j = 0; j < digits.length; j += 1) {
+      remainder = (remainder * 10 + Number(digits[j])) % 97;
+    }
+  }
+  return remainder === 1;
+}
+
 const PII_RULES: PatternRule[] = [
   {
     category: 'AWS_KEY',
@@ -56,9 +85,13 @@ const PII_RULES: PatternRule[] = [
     regex: /\beyJ[A-Za-z0-9_-]{6,}\.eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\b/g
   },
   {
+    category: 'PEM_KEY',
+    regex: /(?:-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----|-----BEGIN PGP PRIVATE KEY BLOCK-----[\s\S]*?-----END PGP PRIVATE KEY BLOCK-----)/g
+  },
+  {
     category: 'API_SECRET',
     regex:
-      /\b(?:sk-(?:live|test|proj)?-?[A-Za-z0-9_-]{16,}|AIza[0-9A-Za-z_-]{20,}|ghp_[0-9A-Za-z]{20,}|xox[baprs]-[0-9A-Za-z-]{12,})\b/g
+      /\b(?:sk-(?:live|test|proj)?-?[A-Za-z0-9_-]{16,}|AIza[0-9A-Za-z_-]{20,}|ghp_[0-9A-Za-z]{20,}|glpat-[A-Za-z0-9_-]{16,}|whsec_[A-Za-z0-9]{16,}|npm_[A-Za-z0-9]{20,}|xox[baprs]-[0-9A-Za-z-]{12,}|(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{12,})\b/g
   },
   {
     category: 'SSN',
@@ -66,11 +99,13 @@ const PII_RULES: PatternRule[] = [
   },
   {
     category: 'EIN',
-    regex: /\b\d{2}-\d{7}\b/g
+    regex: /\b\d{2}-\d{7}\b/g,
+    validate: isValidEinMatch
   },
   {
     category: 'IBAN',
-    regex: /\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b/g
+    regex: /\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b/g,
+    validate: isValidIban
   },
   {
     category: 'CARD',
@@ -90,12 +125,22 @@ const PII_RULES: PatternRule[] = [
   {
     category: 'IPV4',
     regex:
-      /\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b/g
+      /(?<![vV])\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b/g,
+    validate: (val) => val !== '0.0.0.0' && val !== '255.255.255.255'
+  },
+  {
+    category: 'IPV6',
+    regex:
+      /(?<![A-Fa-f0-9:])(?:(?:[A-Fa-f0-9]{1,4}:){7}[A-Fa-f0-9]{1,4}|(?:[A-Fa-f0-9]{1,4}:){1,7}:|:(?::[A-Fa-f0-9]{1,4}){1,7}|(?:[A-Fa-f0-9]{1,4}:){1,6}:[A-Fa-f0-9]{1,4}|(?:[A-Fa-f0-9]{1,4}:){1,5}(?::[A-Fa-f0-9]{1,4}){1,2}|(?:[A-Fa-f0-9]{1,4}:){1,4}(?::[A-Fa-f0-9]{1,4}){1,3}|(?:[A-Fa-f0-9]{1,4}:){1,3}(?::[A-Fa-f0-9]{1,4}){1,4}|(?:[A-Fa-f0-9]{1,4}:){1,2}(?::[A-Fa-f0-9]{1,4}){1,5}|[A-Fa-f0-9]{1,4}:(?::[A-Fa-f0-9]{1,4}){1,6}|::1)(?![A-Fa-f0-9:])/g
   },
   {
     category: 'ADDRESS',
     regex:
       /\b\d{1,5}[ \t]+[A-Za-z0-9.]+(?:[ \t]+[A-Za-z0-9.]+){0,4}[ \t]+(?:Street|St\.?|Avenue|Ave\.?|Boulevard|Blvd\.?|Road|Rd\.?|Drive|Dr\.?|Lane|Ln\.?|Terrace|Ter\.?|Court|Ct\.?|Place|Pl\.?|Way|Parkway|Pkwy\.?)(?:(?:,[ \t]*|[ \t]+)(?:Suite|Ste\.?|Apt\.?|Apartment|Unit|Floor|Fl\.?|#)[ \t]*[A-Za-z0-9-]+)?(?:,[ \t]*[A-Za-z][A-Za-z. \t-]{1,28},[ \t]*[A-Z]{2}(?:[ \t]+\d{5}(?:-\d{4})?)?)?\b/gi
+  },
+  {
+    category: 'ADDRESS',
+    regex: /\bP\.?O\.?\s*Box\s+\d+[A-Za-z0-9-]*/gi
   }
 ];
 
@@ -104,6 +149,7 @@ function createEmptyCounts(): Record<PiiCategory, number> {
     API_SECRET: 0,
     AWS_KEY: 0,
     JWT: 0,
+    PEM_KEY: 0,
     SSN: 0,
     EIN: 0,
     CARD: 0,
@@ -111,6 +157,7 @@ function createEmptyCounts(): Record<PiiCategory, number> {
     EMAIL: 0,
     PHONE: 0,
     IPV4: 0,
+    IPV6: 0,
     ADDRESS: 0,
     CUSTOM: 0,
     PERSON: 0,
@@ -133,7 +180,7 @@ function buildTermRegex(term: string): RegExp {
 }
 
 const EXISTING_TOKEN_RE =
-  /\[(?:API_SECRET|AWS_KEY|JWT|SSN|EIN|CARD|IBAN|EMAIL|PHONE|IPV4|ADDRESS|CUSTOM|PERSON|ORG|CODENAME)_\d+\]/g;
+  /\[(?:API_SECRET|AWS_KEY|JWT|PEM_KEY|SSN|EIN|CARD|IBAN|EMAIL|PHONE|IPV4|IPV6|ADDRESS|CUSTOM|PERSON|ORG|CODENAME)_\d+\]/;
 
 /**
  * Deterministically masks sensitive PII & secrets locally in-browser before any
@@ -146,13 +193,14 @@ export function redactSensitiveData(
   const countsByCategory = createEmptyCounts();
   const valueToToken = new Map<string, string>();
   const vault: Record<string, string> = {};
-  const rawSpans: Array<{
+  type CandidateSpan = {
     start: number;
     end: number;
     category: PiiCategory;
     original: string;
     key: string;
-  }> = [];
+  };
+  const candidates: CandidateSpan[] = [];
 
   for (const rule of PII_RULES) {
     const regex = new RegExp(rule.regex.source, rule.regex.flags);
@@ -164,19 +212,21 @@ export function redactSensitiveData(
       }
       const start = match.index;
       const end = start + original.length;
-
-      const overlaps = rawSpans.some(
-        (existing) => !(end <= existing.start || start >= existing.end)
-      );
-      if (!overlaps) {
-        rawSpans.push({
-          start,
-          end,
-          category: rule.category,
-          original,
-          key: `${rule.category}::${original}`
-        });
-      }
+      const normalizedKeyVal =
+        rule.category === 'EMAIL' ||
+        rule.category === 'IPV4' ||
+        rule.category === 'IPV6'
+          ? original.toLowerCase()
+          : rule.category === 'PHONE'
+            ? original.replace(/\D/g, '')
+            : original;
+      candidates.push({
+        start,
+        end,
+        category: rule.category,
+        original,
+        key: `${rule.category}::${normalizedKeyVal}`
+      });
     }
   }
 
@@ -196,18 +246,27 @@ export function redactSensitiveData(
       const original = match[0];
       const start = match.index;
       const end = start + original.length;
-      const overlaps = rawSpans.some(
-        (existing) => !(end <= existing.start || start >= existing.end)
-      );
-      if (!overlaps) {
-        rawSpans.push({
-          start,
-          end,
-          category: 'CUSTOM',
-          original,
-          key: `CUSTOM::${original.toLowerCase()}`
-        });
-      }
+      candidates.push({
+        start,
+        end,
+        category: 'CUSTOM',
+        original,
+        key: `CUSTOM::${original.toLowerCase()}`
+      });
+    }
+  }
+
+  candidates.sort(
+    (a, b) => b.end - b.start - (a.end - a.start) || a.start - b.start
+  );
+
+  const rawSpans: CandidateSpan[] = [];
+  for (const candidate of candidates) {
+    const overlaps = rawSpans.some(
+      (existing) => !(candidate.end <= existing.start || candidate.start >= existing.end)
+    );
+    if (!overlaps) {
+      rawSpans.push(candidate);
     }
   }
 
@@ -304,68 +363,96 @@ export function mergeSemanticRedactions(
   // Reset stateful regex lastIndex after filter check
   EXISTING_TOKEN_RE.lastIndex = 0;
 
-  let currentText = base.redactedText;
+  const baseText = base.redactedText;
   let entitiesAdded = 0;
 
-  for (const entity of dedupedEntities) {
-    // Collect ranges of existing vault tokens so we never replace inside a token
-    const protectedRanges: Array<{ start: number; end: number }> = [];
-    const tokenRe = new RegExp(EXISTING_TOKEN_RE.source, 'g');
-    let tMatch: RegExpExecArray | null;
-    while ((tMatch = tokenRe.exec(currentText)) !== null) {
-      protectedRanges.push({
-        start: tMatch.index,
-        end: tMatch.index + tMatch[0].length
-      });
-    }
+  // Collect ranges of existing vault tokens once so we never replace inside a token
+  const protectedRanges: Array<{ start: number; end: number }> = [];
+  const tokenRe = new RegExp(EXISTING_TOKEN_RE.source, 'g');
+  let tMatch: RegExpExecArray | null;
+  while ((tMatch = tokenRe.exec(baseText)) !== null) {
+    protectedRanges.push({
+      start: tMatch.index,
+      end: tMatch.index + tMatch[0].length
+    });
+  }
 
+  // Collect all candidate entity spans in a single pass
+  const candidateSpans: Array<{
+    start: number;
+    end: number;
+    original: string;
+    category: PiiCategory;
+    lookupKey: string;
+  }> = [];
+
+  for (const entity of dedupedEntities) {
     const entityRe = buildTermRegex(entity.value);
-    const spans: Array<{ start: number; end: number; original: string }> = [];
+    const lookupKey = `${entity.category}::${entity.value.toLowerCase()}`;
     let eMatch: RegExpExecArray | null;
-    while ((eMatch = entityRe.exec(currentText)) !== null) {
+    while ((eMatch = entityRe.exec(baseText)) !== null) {
       const start = eMatch.index;
       const end = start + eMatch[0].length;
       const insideProtected = protectedRanges.some(
         (r) => !(end <= r.start || start >= r.end)
       );
       if (!insideProtected) {
-        spans.push({ start, end, original: eMatch[0] });
+        candidateSpans.push({
+          start,
+          end,
+          original: eMatch[0],
+          category: entity.category,
+          lookupKey
+        });
       }
     }
+  }
 
-    if (spans.length === 0) continue;
+  // Resolve overlaps in a single O(N log N) sweep: earliest start first, then longest match.
+  candidateSpans.sort((a, b) => {
+    if (a.start !== b.start) return a.start - b.start;
+    return b.end - b.start - (a.end - a.start);
+  });
 
-    const lookupKey = `${entity.category}::${entity.value.toLowerCase()}`;
-    let token = valueToToken.get(lookupKey);
+  const acceptedSpans: typeof candidateSpans = [];
+  let lastEnd = -1;
+  for (const span of candidateSpans) {
+    if (span.start >= lastEnd) {
+      acceptedSpans.push(span);
+      lastEnd = span.end;
+    }
+  }
+
+  // Assign tokens and apply all replacements in one linear cursor pass.
+  // Note: match start/end offsets are relative to the input redactedText.
+  let rebuilt = '';
+  let cursor = 0;
+  for (const span of acceptedSpans) {
+    let token = valueToToken.get(span.lookupKey);
     if (!token) {
-      countsByCategory[entity.category] += 1;
-      token = `[${entity.category}_${countsByCategory[entity.category]}]`;
-      valueToToken.set(lookupKey, token);
-      vault[token] = spans[0].original;
+      countsByCategory[span.category] += 1;
+      token = `[${span.category}_${countsByCategory[span.category]}]`;
+      valueToToken.set(span.lookupKey, token);
+      vault[token] = span.original;
       entitiesAdded += 1;
     }
 
-    let rebuilt = '';
-    let cursor = 0;
-    for (const span of spans) {
-      rebuilt += currentText.slice(cursor, span.start) + token;
-      cursor = span.end;
-      matches.push({
-        token,
-        category: entity.category,
-        original: span.original,
-        start: span.start,
-        end: span.end
-      });
-    }
-    rebuilt += currentText.slice(cursor);
-    currentText = rebuilt;
+    rebuilt += baseText.slice(cursor, span.start) + token;
+    cursor = span.end;
+    matches.push({
+      token,
+      category: span.category,
+      original: span.original,
+      start: span.start,
+      end: span.end
+    });
   }
+  rebuilt += baseText.slice(cursor);
 
   return {
     result: {
       originalText: base.originalText,
-      redactedText: currentText,
+      redactedText: rebuilt,
       matches,
       vault,
       countsByCategory,
@@ -382,11 +469,7 @@ export function restoreFromVault(
   text: string,
   vault: Record<string, string>
 ): string {
-  let output = text;
-  for (const [token, original] of Object.entries(vault)) {
-    output = output.split(token).join(original);
-  }
-  return output;
+  return text.replace(/\[[A-Z0-9_]+_\d+\]/g, (token) => vault[token] ?? token);
 }
 
 /**

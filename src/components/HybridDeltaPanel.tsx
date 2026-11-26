@@ -94,7 +94,26 @@ export function HybridDeltaPanel({
         </div>
 
         {hasEscalation && (
-          <div className="tab-group" role="tablist" aria-label="Analysis stage view">
+          <div
+            className="tab-group"
+            role="tablist"
+            aria-label="Analysis stage view"
+            onKeyDown={(event) => {
+              const order: Array<'merged' | 'triage' | 'escalation'> = [
+                'merged',
+                'triage',
+                'escalation'
+              ];
+              const idx = order.indexOf(viewMode);
+              if (event.key === 'ArrowRight') {
+                event.preventDefault();
+                onViewModeChange(order[(idx + 1) % order.length]);
+              } else if (event.key === 'ArrowLeft') {
+                event.preventDefault();
+                onViewModeChange(order[(idx - 1 + order.length) % order.length]);
+              }
+            }}
+          >
             <button
               type="button"
               role="tab"

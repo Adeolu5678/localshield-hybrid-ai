@@ -20,16 +20,12 @@ import { RedactionDiff } from './components/RedactionDiff';
 import { TelemetryBar } from './components/TelemetryBar';
 import { SAMPLE_DOCUMENTS } from './data/sampleDocuments';
 import { extractPartialClausesFromStream } from './lib/analysisParser';
-import {
-  ACCEPTED_FILE_EXTENSIONS,
-  ingestUploadedFile,
-  type IngestedDocumentMeta
-} from './lib/documentIngestor';
-import { exportEditedDocument } from './lib/documentExporter';
+import type { IngestedDocumentMeta } from './lib/documentIngestor';
 import {
   getInitialRuntimeStatus,
   getUnconfiguredRuntimeStatus,
   initializeFirebaseServices,
+  warmUpModelCache,
   type FirebaseServicesHandle
 } from './lib/firebaseClient';
 import {
@@ -213,10 +209,30 @@ export function App() {
     return () => window.clearInterval(id);
   }, [isAnalyzing]);
 
-  const partialClauses = useMemo(
-    () => extractPartialClausesFromStream(streamPreview),
-    [streamPreview]
-  );
+  const [partialClauses, setPartialClauses] = useState<
+    ReturnType<typeof extractPartialClausesFromStream>
+  >([]);
+  const lastPartialParseRef = useRef<number>(0);
+
+  useEffect(() => {
+    if (!isAnalyzing || !streamPreview) {
+      setPartialClauses([]);
+      lastPartialParseRef.current = 0;
+      return;
+    }
+    const now = Date.now();
+    const elapsed = now - lastPartialParseRef.current;
+    if (elapsed >= 150) {
+      lastPartialParseRef.current = now;
+      setPartialClauses(extractPartialClausesFromStream(streamPreview));
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      lastPartialParseRef.current = Date.now();
+      setPartialClauses(extractPartialClausesFromStream(streamPreview));
+    }, 150 - elapsed);
+    return () => window.clearTimeout(timer);
+  }, [isAnalyzing, streamPreview]);
 
   const [analysisViewMode, setAnalysisViewMode] =
     useState<AnalysisViewMode>('merged');
@@ -231,8 +247,6 @@ export function App() {
   );
   const [restoreVaultForExport, setRestoreVaultForExport] = useState(false);
   const [exportCopied, setExportCopied] = useState(false);
-  const [_exportDownloaded, setExportDownloaded] = useState(false);
-  void _exportDownloaded;
 
   const [sampleMenuOpen, setSampleMenuOpen] = useState(false);
   const [policyMenuOpen, setPolicyMenuOpen] = useState(false);
@@ -277,7 +291,11 @@ export function App() {
   const [historyOpen, setHistoryOpen] = useState(false);
 
   useEffect(() => {
-    const anyDrawerOpen = diagnosticsOpen || historyOpen || privacyDrawerOpen;
+    const anyDrawerOpen =
+      diagnosticsOpen ||
+      historyOpen ||
+      privacyDrawerOpen ||
+      Boolean(negotiatingClause);
     if (!anyDrawerOpen) return;
     const scrollY = window.scrollY;
     document.body.style.position = 'fixed';
@@ -293,7 +311,7 @@ export function App() {
       document.body.style.overflow = '';
       window.scrollTo(0, scrollY);
     };
-  }, [diagnosticsOpen, historyOpen, privacyDrawerOpen]);
+  }, [diagnosticsOpen, historyOpen, privacyDrawerOpen, negotiatingClause]);
 
   useEffect(() => {
     if (reviewStep === 'final') {
@@ -309,13 +327,40 @@ export function App() {
     [customTermChips, customTermDraft]
   );
 
+  const [debouncedDocText, setDebouncedDocText] = useState(documentText);
+  useEffect(() => {
+    if (documentText.length <= 20_000) {
+      setDebouncedDocText(documentText);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setDebouncedDocText(documentText);
+    }, 180);
+    return () => window.clearTimeout(timer);
+  }, [documentText]);
+
   const liveRedaction = useMemo(
-    () => redactDocument(documentText, { customTerms: effectiveCustomTerms }),
-    [documentText, effectiveCustomTerms]
+    () => redactDocument(debouncedDocText, { customTerms: effectiveCustomTerms }),
+    [debouncedDocText, effectiveCustomTerms]
   );
 
+  const reportCustomTermsKey = useMemo(
+    () => (report ? effectiveCustomTerms.join('\u0000') : ''),
+    [report, effectiveCustomTerms]
+  );
+  const [lastReportTermsKey, setLastReportTermsKey] = useState('');
+  useEffect(() => {
+    if (report) {
+      setLastReportTermsKey(effectiveCustomTerms.join('\u0000'));
+    }
+    // Only capture the custom terms active when the report object changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [report]);
+
   const displayRedaction =
-    report && report.redaction.originalText === documentText
+    report &&
+    report.redaction.originalText === documentText &&
+    reportCustomTermsKey === lastReportTermsKey
       ? report.redaction
       : liveRedaction;
 
@@ -331,6 +376,24 @@ export function App() {
         : undefined,
     [firebaseHandle]
   );
+
+  useEffect(() => {
+    if (!firebaseHandle) return;
+    const win = window as Window & {
+      requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
+      cancelIdleCallback?: (id: number) => void;
+    };
+    if (typeof win.requestIdleCallback === 'function') {
+      const id = win.requestIdleCallback(() => {
+        warmUpModelCache(firebaseHandle);
+      }, { timeout: 2000 });
+      return () => win.cancelIdleCallback?.(id);
+    }
+    const timer = window.setTimeout(() => {
+      warmUpModelCache(firebaseHandle);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [firebaseHandle]);
 
   useEffect(() => {
     let active = true;
@@ -437,11 +500,6 @@ export function App() {
     }
   };
 
-  const _removeCustomTerm = (term: string) => {
-    void _removeCustomTerm;
-    setCustomTermChips((prev) => prev.filter((item) => item !== term));
-  };
-
   const handleSampleSelect = (id: string) => {
     const sample = SAMPLE_DOCUMENTS.find((d) => d.id === id);
     if (!sample) return;
@@ -467,6 +525,7 @@ export function App() {
 
     try {
       for (const file of files) {
+        const { ingestUploadedFile } = await import('./lib/documentIngestor');
         const result = await ingestUploadedFile(file);
         if (result.kind === 'image' && result.attachment) {
           setInlineAttachments((prev) => [...prev, result.attachment!]);
@@ -772,6 +831,7 @@ export function App() {
       })
       .filter((item) => Boolean(item.original && item.replacement));
 
+    const { exportEditedDocument } = await import('./lib/documentExporter');
     const { blob, filename } = await exportEditedDocument({
       originalFilename: ingestedSource?.filename,
       originalBuffer: ingestedSource?.originalBuffer,
@@ -787,13 +847,12 @@ export function App() {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-    setExportDownloaded(true);
-    setTimeout(() => setExportDownloaded(false), 1800);
   };
 
   const handlePrintPdf = () => {
-    handlePrintPdf();
+    window.print();
   };
+  void handlePrintPdf;
 
   const handleInstallPwa = async () => {
     if (!deferredInstallPrompt) return;
@@ -1307,7 +1366,7 @@ export function App() {
                     <span>{isIngestingFile ? "Reading..." : "Upload PDF, DOCX, or Image"}</span>
                     <input
                       type="file"
-                      accept={ACCEPTED_FILE_EXTENSIONS}
+                      accept=".txt,.md,.pdf,.docx,.png,.jpg,.jpeg,.webp"
                       multiple
                       onChange={(e) => void handleFileUpload(e)}
                       hidden
@@ -1557,7 +1616,10 @@ export function App() {
                             };
                             const matches: MatchRange[] = [];
                             for (const clause of activeAnalysis.clauses) {
-                              const rawExcerpt = clause.excerpt.trim();
+                              const rawExcerpt = restoreFromVault(
+                                clause.excerpt,
+                                report.redaction.vault
+                              ).trim();
                               if (!rawExcerpt) continue;
                               const segments = rawExcerpt
                                 .split(/\.{3}|…/)

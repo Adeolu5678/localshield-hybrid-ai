@@ -58,7 +58,7 @@ export function arrayBufferToBase64(buffer: ArrayBuffer): string {
     return Buffer.from(bytes).toString('base64');
   }
   let binary = '';
-  const chunkSize = 0x8000;
+  const chunkSize = 8192;
   for (let i = 0; i < bytes.length; i += chunkSize) {
     const slice = bytes.subarray(i, i + chunkSize);
     binary += String.fromCharCode(...slice);
@@ -96,10 +96,15 @@ async function extractPdfTextLocally(
   for (let pageNum = 1; pageNum <= pdf.numPages; pageNum += 1) {
     const page = await pdf.getPage(pageNum);
     const content = await page.getTextContent();
-    const strings = content.items
-      .map((item) => ('str' in item && typeof item.str === 'string' ? item.str : ''))
-      .filter((s) => s.length > 0);
-    pageTexts.push(strings.join(' ').replace(/[ \t]{2,}/g, ' ').trim());
+    let pageText = '';
+    for (const item of content.items) {
+      if (!('str' in item) || typeof item.str !== 'string') continue;
+      const str = item.str;
+      if (str.length === 0) continue;
+      pageText += str;
+      pageText += 'hasEOL' in item && item.hasEOL ? '\n' : ' ';
+    }
+    pageTexts.push(pageText.replace(/[ \t]{2,}/g, ' ').trim());
   }
 
   return {
@@ -121,9 +126,16 @@ async function extractDocxTextLocally(
  * Supports .pdf, .docx, .txt, .md, .policy, .contract, and scanned images
  * (.png, .jpg, .jpeg, .webp) converted to InlineAttachment objects.
  */
+const MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024;
+
 export async function ingestUploadedFile(
   file: File
 ): Promise<IngestedFileResult> {
+  if (file.size > MAX_FILE_SIZE_BYTES) {
+    throw new Error(
+      `File "${file.name}" exceeds the 25 MB client-side limit (${(file.size / (1024 * 1024)).toFixed(1)} MB).`
+    );
+  }
   const ext = getFileExtension(file.name);
   const mime = (file.type || '').toLowerCase();
 
@@ -164,6 +176,11 @@ export async function ingestUploadedFile(
   if (ext === 'pdf' || mime === 'application/pdf') {
     const buffer = await readFileAsArrayBuffer(file);
     const { text, pageCount } = await extractPdfTextLocally(buffer);
+    if (text.trim().length === 0) {
+      throw new Error(
+        `No selectable text found in "${file.name}" (it may be a scanned/image-only PDF). Please upload a screenshot or image (.png/.jpg) for multimodal OCR.`
+      );
+    }
     return {
       kind: 'pdf',
       meta: {

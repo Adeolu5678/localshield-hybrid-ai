@@ -84,7 +84,7 @@ export function readFirebaseEnvConfig(
   return {
     config: {
       firebaseOptions,
-      cloudModel: env.VITE_FIREBASE_CLOUD_MODEL?.trim() || 'gemini-3-flash-preview',
+      cloudModel: env.VITE_FIREBASE_CLOUD_MODEL?.trim() || 'gemini-2.5-flash-lite',
       appCheckDebugToken: env.VITE_APPCHECK_DEBUG_TOKEN?.trim() || '',
       appCheckProvider:
         env.VITE_APPCHECK_PROVIDER?.trim() === 'recaptcha-v3'
@@ -123,11 +123,22 @@ export const DOCUMENT_ANALYSIS_SCHEMA: ObjectSchema = Schema.object({
           title: Schema.string(),
           category: Schema.string(),
           severity: Schema.enumString({
-            enum: ['critical', 'high', 'medium', 'low']
+            enum: ['critical', 'high', 'medium', 'low'],
+            description:
+              'Calibrated severity: critical (uncapped liability, perpetual IP/AI license, unilateral termination/modification), high (asymmetric indemnity, silent auto-renewal, MFN, >72h breach notice), medium (ambiguous SLA/cure period), low (minor boilerplate).'
           }),
-          excerpt: Schema.string(),
-          rationale: Schema.string(),
-          redlineProposal: Schema.string()
+          excerpt: Schema.string({
+            description:
+              'Short exact verbatim quote copied directly from the document; never paraphrase or fabricate.'
+          }),
+          rationale: Schema.string({
+            description:
+              'Structured legal impact: (1) concrete financial/IP/liability exposure, (2) defined-term or cross-clause interaction, (3) worst-case scenario for the reviewing party.'
+          }),
+          redlineProposal: Schema.string({
+            description:
+              'Drop-in replacement contract language with mutual caps, notice periods, or explicit carve-outs — not generic advice.'
+          })
         }
       })
     }),
@@ -177,6 +188,19 @@ export const ON_DEVICE_JSON_CONSTRAINT: Record<string, unknown> = {
     complianceFlags: {
       type: 'array',
       items: { type: 'string' }
+    },
+    crossClauseFindings: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          title: { type: 'string' },
+          involvedClauses: { type: 'array', items: { type: 'string' } },
+          impact: { type: 'string' },
+          negotiationMove: { type: 'string' }
+        }
+      }
     }
   },
   required: ['documentType', 'overallRiskScore', 'riskPosture', 'executiveSummary', 'clauses']
@@ -225,6 +249,14 @@ export const SEMANTIC_PII_ON_DEVICE_CONSTRAINT: Record<string, unknown> = {
  * Builds either a plain text prompt or a multimodal Parts array including
  * inlineData attachments (e.g., scanned contract images or PDF pages).
  */
+const SUPPORTED_INLINE_MIME_TYPES = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/webp',
+  'image/gif',
+  'application/pdf'
+]);
+
 export function buildMultimodalContentParts(
   prompt: string,
   attachments?: InlineAttachment[]
@@ -235,6 +267,7 @@ export function buildMultimodalContentParts(
   const parts: Array<string | Part> = [prompt];
   for (const att of attachments) {
     if (!att.mimeType || !att.data) continue;
+    if (!SUPPORTED_INLINE_MIME_TYPES.has(att.mimeType.toLowerCase())) continue;
     parts.push({
       type: 'inlineData',
       inlineData: {
@@ -259,7 +292,7 @@ export interface FirebaseServicesHandle {
   refreshAppCheckStatus: () => Promise<AppCheckStatus>;
 }
 
-const APP_CHECK_TOKEN_TIMEOUT_MS = 5000;
+const APP_CHECK_TOKEN_TIMEOUT_MS = 8000;
 
 function getAppCheckTokenWithTimeout(
   appCheckInstance: AppCheck,
@@ -276,7 +309,9 @@ function getAppCheckTokenWithTimeout(
     }, timeoutMs);
   });
 
-  return Promise.race([getToken(appCheckInstance, false), timeoutPromise]).finally(
+  const tokenPromise = getToken(appCheckInstance, false);
+  tokenPromise.catch(() => {});
+  return Promise.race([tokenPromise, timeoutPromise]).finally(
     () => {
       if (timerId !== undefined) clearTimeout(timerId);
     }
@@ -284,6 +319,7 @@ function getAppCheckTokenWithTimeout(
 }
 
 let cachedHandle: FirebaseServicesHandle | null = null;
+let cachedConfigSignature: string | null = null;
 const modelCache = new Map<string, GenerativeModel>();
 
 export function resetModelCache(): void {
@@ -293,6 +329,7 @@ export function resetModelCache(): void {
 export function resetFirebaseClientForTests(): void {
   modelCache.clear();
   cachedHandle = null;
+  cachedConfigSignature = null;
 }
 
 export function mapPolicyToSdkInferenceMode(mode: HybridPolicyMode): InferenceMode {
@@ -352,8 +389,9 @@ function buildHybridParams(
     };
   }
 
+  const sdkMode = mapPolicyToSdkInferenceMode(mode);
   return {
-    mode: mapPolicyToSdkInferenceMode(mode),
+    mode: sdkMode,
     onDeviceParams: {
       createOptions: {
         expectedInputs: [{ type: 'text', languages: ['en'] }],
@@ -363,25 +401,54 @@ function buildHybridParams(
         responseConstraint: ON_DEVICE_JSON_CONSTRAINT
       }
     },
-    inCloudParams: {
-      model: cloudModel,
-      generationConfig: {
-        responseMimeType: 'application/json',
-        responseSchema: DOCUMENT_ANALYSIS_SCHEMA
-      }
-    }
+    ...(mode === 'only_on_device'
+      ? {}
+      : {
+          inCloudParams: {
+            model: cloudModel,
+            generationConfig: {
+              responseMimeType: 'application/json',
+              responseSchema: DOCUMENT_ANALYSIS_SCHEMA
+            }
+          }
+        })
   };
 }
 
-export async function initializeFirebaseServices(): Promise<FirebaseServicesHandle | null> {
-  if (cachedHandle) return cachedHandle;
+let inFlightInitPromise: Promise<FirebaseServicesHandle | null> | null = null;
 
+export async function initializeFirebaseServices(): Promise<FirebaseServicesHandle | null> {
   const { config, missingEnvKeys } = readFirebaseEnvConfig();
   if (missingEnvKeys.length > 0) {
     return null;
   }
 
-  const app = getApps().length > 0 ? getApp() : initializeApp(config.firebaseOptions);
+  const configSignature = JSON.stringify({
+    firebaseOptions: config.firebaseOptions,
+    cloudModel: config.cloudModel,
+    appCheckDebugToken: config.appCheckDebugToken,
+    appCheckProvider: config.appCheckProvider,
+    recaptchaSiteKey: config.recaptchaSiteKey,
+    useLimitedUseAppCheckTokens: config.useLimitedUseAppCheckTokens
+  });
+
+  if (cachedHandle && cachedConfigSignature === configSignature) {
+    return cachedHandle;
+  }
+
+  if (inFlightInitPromise && cachedConfigSignature === configSignature) {
+    return inFlightInitPromise;
+  }
+
+  if (cachedConfigSignature !== configSignature) {
+    modelCache.clear();
+    cachedHandle = null;
+    cachedConfigSignature = configSignature;
+  }
+
+  inFlightInitPromise = (async () => {
+    try {
+      const app = getApps().length > 0 ? getApp() : initializeApp(config.firebaseOptions);
 
   let appCheck: AppCheck | null = null;
   let appCheckStatus: AppCheckStatus = {
@@ -392,7 +459,7 @@ export async function initializeFirebaseServices(): Promise<FirebaseServicesHand
     note: 'App Check not configured. Set VITE_APPCHECK_RECAPTCHA_SITE_KEY or VITE_APPCHECK_DEBUG_TOKEN.'
   };
 
-  if (typeof window !== 'undefined' && config.appCheckDebugToken) {
+  if (typeof window !== 'undefined' && config.appCheckDebugToken && import.meta.env?.DEV) {
     window.FIREBASE_APPCHECK_DEBUG_TOKEN =
       config.appCheckDebugToken === 'true' ? true : config.appCheckDebugToken;
   }
@@ -448,7 +515,7 @@ export async function initializeFirebaseServices(): Promise<FirebaseServicesHand
   ): GenerativeModel => {
     const effectiveMode =
       schemaKey === 'semantic_pii' ? 'only_on_device' : mode;
-    const cacheKey = `${effectiveMode}::${schemaKey}`;
+    const cacheKey = `${effectiveMode}::${schemaKey}::${config.cloudModel}`;
     const existing = modelCache.get(cacheKey);
     if (existing) {
       return existing;
@@ -520,8 +587,33 @@ export async function initializeFirebaseServices(): Promise<FirebaseServicesHand
     clearModelCache: resetModelCache,
     refreshAppCheckStatus
   };
+  cachedConfigSignature = configSignature;
 
   return cachedHandle;
+    } finally {
+      inFlightInitPromise = null;
+    }
+  })();
+
+  return inFlightInitPromise;
+}
+
+/**
+ * Pre-initializes the default `prefer_on_device` model instance during browser
+ * idle time to eliminate first-click cold-start overhead.
+ */
+export function warmUpModelCache(
+  handle: FirebaseServicesHandle | null | undefined
+): boolean {
+  if (!handle) {
+    return false;
+  }
+  try {
+    handle.getHybridModel('prefer_on_device', 'document_analysis');
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function getInitialRuntimeStatus(

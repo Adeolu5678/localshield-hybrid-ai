@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   getInitialRuntimeStatus,
   initializeFirebaseServices,
@@ -27,6 +27,8 @@ interface ExtractedPagePayload {
   title: string;
   url: string;
   text: string;
+  wasTruncated: boolean;
+  fromSelection: boolean;
 }
 
 function mapPolicyChoice(choice: SidePanelPolicyChoice): {
@@ -68,7 +70,12 @@ function severityPillClass(severity: RiskClause['severity']): string {
 
 function isRestrictedUrl(url: string | undefined): boolean {
   if (!url) return true;
-  return /^(?:chrome|edge|about|devtools|chrome-extension|view-source):/i.test(
+  if (
+    /^(?:chrome|edge|about|devtools|chrome-extension|view-source):/i.test(url)
+  ) {
+    return true;
+  }
+  return /^https:\/\/(?:chromewebstore\.google\.com|chrome\.google\.com\/webstore)/i.test(
     url
   );
 }
@@ -80,6 +87,24 @@ function buildCompactBriefMarkdown(
 ): string {
   const active = report.escalation ?? report.triage;
   const route = resolveRouteBadge(report);
+  const complianceSection =
+    active.complianceFlags && active.complianceFlags.length > 0
+      ? [
+          ``,
+          `## Compliance Flags`,
+          ...active.complianceFlags.map((flag) => `- ${flag}`)
+        ]
+      : [];
+  const crossClauseSection =
+    active.crossClauseFindings && active.crossClauseFindings.length > 0
+      ? [
+          ``,
+          `## Cross-Clause Findings`,
+          ...active.crossClauseFindings.map(
+            (cf) => `- **${cf.title}**: ${cf.impact}`
+          )
+        ]
+      : [];
   const lines = [
     `# LegalEase Side-Panel Brief`,
     ``,
@@ -91,6 +116,8 @@ function buildCompactBriefMarkdown(
     ``,
     `## Executive Summary`,
     active.executiveSummary,
+    ...complianceSection,
+    ...crossClauseSection,
     ``,
     `## Flagged Clauses`,
     ...active.clauses.map(
@@ -109,6 +136,9 @@ export function SidePanelApp() {
   const [policyChoice, setPolicyChoice] =
     useState<SidePanelPolicyChoice>('prefer_on_device');
   const [enableSemanticPii, setEnableSemanticPii] = useState(false);
+  const [forceSandbox, setForceSandbox] = useState(false);
+  const [customTermsInput, setCustomTermsInput] = useState('');
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   const [chromeAvailability, setChromeAvailability] =
     useState<ChromeNanoAvailability>('unsupported');
@@ -127,6 +157,26 @@ export function SidePanelApp() {
 
   useEffect(() => {
     let active = true;
+    if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+      void chrome.storage.local
+        .get(['policyChoice', 'customTermsInput'])
+        .then((stored) => {
+          if (!active) return;
+          if (
+            stored.policyChoice === 'prefer_on_device' ||
+            stored.policyChoice === 'only_on_device' ||
+            stored.policyChoice === 'hybrid_escalation'
+          ) {
+            setPolicyChoice(stored.policyChoice);
+          }
+          if (typeof stored.customTermsInput === 'string') {
+            setCustomTermsInput(stored.customTermsInput);
+          }
+        })
+        .catch(() => {
+          // Ignore storage read errors in non-extension preview.
+        });
+    }
     void probeChromeNanoAvailability().then((status) => {
       if (active) setChromeAvailability(status);
     });
@@ -139,6 +189,7 @@ export function SidePanelApp() {
     });
     return () => {
       active = false;
+      abortControllerRef.current?.abort();
     };
   }, []);
 
@@ -150,9 +201,18 @@ export function SidePanelApp() {
     [firebaseHandle]
   );
 
+  const customTerms = useMemo(
+    () =>
+      customTermsInput
+        .split(/[\n,]+/)
+        .map((t) => t.trim())
+        .filter(Boolean),
+    [customTermsInput]
+  );
+
   const liveRedaction = useMemo(
-    () => redactDocument(sourceText),
-    [sourceText]
+    () => redactDocument(sourceText, { customTerms }),
+    [sourceText, customTerms]
   );
 
   const runAuditOnText = async (textToAudit: string) => {
@@ -160,6 +220,10 @@ export function SidePanelApp() {
       setError('No text to audit. Scan an active tab or paste text below.');
       return;
     }
+
+    abortControllerRef.current?.abort();
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
 
     setIsAnalyzing(true);
     setError(null);
@@ -172,18 +236,24 @@ export function SidePanelApp() {
         runCloudEscalation,
         isOnline: typeof navigator !== 'undefined' ? navigator.onLine : true,
         chromeNanoAvailability: chromeAvailability,
-        useSimulatedSandbox: !firebaseHandle,
+        useSimulatedSandbox: forceSandbox || !firebaseHandle,
         cloudModelName,
         modelFactory,
-        enableSemanticPii
+        enableSemanticPii,
+        customTerms,
+        signal: controller.signal
       });
+      if (controller.signal.aborted) return;
       setReport(executionReport);
     } catch (err) {
+      if (controller.signal.aborted) return;
       setError(
         err instanceof Error ? err.message : 'Hybrid analysis failed.'
       );
     } finally {
-      setIsAnalyzing(false);
+      if (!controller.signal.aborted) {
+        setIsAnalyzing(false);
+      }
     }
   };
 
@@ -221,14 +291,20 @@ export function SidePanelApp() {
       const results = await chrome.scripting.executeScript<ExtractedPagePayload>({
         target: { tabId: activeTab.id },
         func: () => {
-          const rawText = (document.body?.innerText || '').trim();
-          const cleaned = rawText
-            .replace(/\n{3,}/g, '\n\n')
-            .slice(0, 28000);
+          const maxChars = 40000;
+          const selection = (window.getSelection()?.toString() || '').trim();
+          const fromSelection = selection.length > 0;
+          const rawText = fromSelection
+            ? selection
+            : (document.body?.innerText || '').trim();
+          const normalized = rawText.replace(/\n{3,}/g, '\n\n');
+          const wasTruncated = normalized.length > maxChars;
           return {
             title: document.title || 'Untitled Page',
             url: window.location.href,
-            text: cleaned
+            text: normalized.slice(0, maxChars),
+            wasTruncated,
+            fromSelection
           };
         }
       });
@@ -245,12 +321,26 @@ export function SidePanelApp() {
       setPageUrl(payload.url);
       setSourceText(payload.text);
       await runAuditOnText(payload.text);
+      if (payload.wasTruncated) {
+        setNotice(
+          `Extracted ${payload.fromSelection ? 'selected text' : 'page text'} was truncated to 40,000 characters.`
+        );
+      } else if (payload.fromSelection) {
+        setNotice('Audited selected text from the active tab.');
+      }
     } catch (err) {
-      setError(
-        err instanceof Error
-          ? `Could not read active tab (${err.message}). Paste text below instead.`
-          : 'Could not read active tab. Paste text below instead.'
-      );
+      const msg = err instanceof Error ? err.message : '';
+      if (/^file:\/\//i.test(pageUrl) || /file:\/\//i.test(msg)) {
+        setError(
+          'Cannot read local file:// URLs unless "Allow access to file URLs" is enabled in Chrome extension settings. Paste text below instead.'
+        );
+      } else {
+        setError(
+          msg
+            ? `Could not read active tab (${msg}). Paste text below instead.`
+            : 'Could not read active tab. Paste text below instead.'
+        );
+      }
     } finally {
       setIsScanningTab(false);
     }
@@ -318,9 +408,15 @@ export function SidePanelApp() {
           <select
             className="sp-select"
             value={policyChoice}
-            onChange={(e) =>
-              setPolicyChoice(e.target.value as SidePanelPolicyChoice)
-            }
+            onChange={(e) => {
+              const next = e.target.value as SidePanelPolicyChoice;
+              setPolicyChoice(next);
+              if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+                void chrome.storage.local
+                  .set({ policyChoice: next })
+                  .catch(() => {});
+              }
+            }}
           >
             <option value="prefer_on_device">Prefer On-Device</option>
             <option value="only_on_device">Strict Air-Gap (Nano Only)</option>
@@ -335,6 +431,34 @@ export function SidePanelApp() {
             onChange={(e) => setEnableSemanticPii(e.target.checked)}
           />
           <span>Stage 0.5 Semantic PII (On-Device PERSON/ORG scrub)</span>
+        </label>
+
+        <label className="sp-checkbox">
+          <input
+            type="checkbox"
+            checked={forceSandbox}
+            onChange={(e) => setForceSandbox(e.target.checked)}
+          />
+          <span>Sandbox Mode (Simulated local heuristic)</span>
+        </label>
+
+        <label>
+          <span className="sp-label">Custom Redaction Terms</span>
+          <input
+            type="text"
+            className="sp-select"
+            value={customTermsInput}
+            onChange={(e) => {
+              const next = e.target.value;
+              setCustomTermsInput(next);
+              if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+                void chrome.storage.local
+                  .set({ customTermsInput: next })
+                  .catch(() => {});
+              }
+            }}
+            placeholder="Comma-separated names, orgs, or IDs..."
+          />
         </label>
 
         <textarea

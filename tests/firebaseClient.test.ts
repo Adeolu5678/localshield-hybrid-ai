@@ -106,7 +106,7 @@ describe('firebaseClient startup, model caching, and App Check resilience', () =
     expect(handle).not.toBeNull();
     expect(handle?.status.configured).toBe(true);
     expect(handle?.status.projectId).toBe('localshield-hybrid-ai-5678');
-    expect(handle?.status.cloudModel).toBe('gemini-3-flash-preview');
+    expect(handle?.status.cloudModel).toBe('gemini-2.5-flash-lite');
     expect(handle?.status.appCheck.initialized).toBe(true);
     expect(handle?.status.appCheck.mode).toBe('recaptcha-enterprise');
     expect(getTokenMock).not.toHaveBeenCalled();
@@ -178,11 +178,11 @@ describe('firebaseClient startup, model caching, and App Check resilience', () =
     expect(handle).not.toBeNull();
 
     const refreshPromise = handle!.refreshAppCheckStatus();
-    await vi.advanceTimersByTimeAsync(5000);
+    await vi.advanceTimersByTimeAsync(8000);
     const updatedStatus = await refreshPromise;
 
     expect(updatedStatus.tokenVerified).toBe(false);
-    expect(updatedStatus.note).toContain('Timed out after 5000ms');
-    expect(handle!.status.appCheck.note).toContain('Timed out after 5000ms');
+    expect(updatedStatus.note).toContain('Timed out after 8000ms');
+    expect(handle!.status.appCheck.note).toContain('Timed out after 8000ms');
   });
 });

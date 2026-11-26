@@ -11,6 +11,7 @@ interface RedactionDiffProps {
 }
 
 const CATEGORY_ORDER: PiiCategory[] = [
+  'PEM_KEY',
   'AWS_KEY',
   'JWT',
   'API_SECRET',
@@ -21,6 +22,7 @@ const CATEGORY_ORDER: PiiCategory[] = [
   'EMAIL',
   'PHONE',
   'IPV4',
+  'IPV6',
   'ADDRESS',
   'CUSTOM',
   'PERSON',
@@ -29,9 +31,9 @@ const CATEGORY_ORDER: PiiCategory[] = [
 ];
 
 const TOKEN_SPLIT_RE =
-  /(\[(?:API_SECRET|AWS_KEY|JWT|SSN|EIN|CARD|IBAN|EMAIL|PHONE|IPV4|ADDRESS|CUSTOM|PERSON|ORG|CODENAME)_\d+\])/g;
+  /(\[(?:PEM_KEY|API_SECRET|AWS_KEY|JWT|SSN|EIN|CARD|IBAN|EMAIL|PHONE|IPV4|IPV6|ADDRESS|CUSTOM|PERSON|ORG|CODENAME)_\d+\])/g;
 const TOKEN_EXACT_RE =
-  /^\[(?:API_SECRET|AWS_KEY|JWT|SSN|EIN|CARD|IBAN|EMAIL|PHONE|IPV4|ADDRESS|CUSTOM|PERSON|ORG|CODENAME)_\d+\]$/;
+  /^\[(?:PEM_KEY|API_SECRET|AWS_KEY|JWT|SSN|EIN|CARD|IBAN|EMAIL|PHONE|IPV4|IPV6|ADDRESS|CUSTOM|PERSON|ORG|CODENAME)_\d+\]$/;
 
 function renderHighlightedPayload(text: string): ReactNode {
   if (!text.trim()) {

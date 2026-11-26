@@ -96,6 +96,7 @@ export interface RouterOptions {
   inlineAttachments?: InlineAttachment[];
   maxCharsPerChunk?: number;
   maxChunks?: number;
+  bypassCache?: boolean;
   signal?: AbortSignal;
   onStreamChunk?: (chunkText: string, stage: PipelineStage) => void;
   onStageChange?: (stage: PipelineStage) => void;
@@ -115,6 +116,27 @@ interface ChromeLanguageModelGlobal {
 
 const DEFAULT_TRIAGE_CHUNK_CHARS = 10000;
 const DEFAULT_MAX_CHUNKS = 4;
+const DEFAULT_CHUNK_OVERLAP_CHARS = 300;
+const MAX_HYBRID_CACHE_ENTRIES = 20;
+
+const hybridAnalysisCache = new Map<string, HybridExecutionReport>();
+
+export function clearHybridAnalysisCache(): void {
+  hybridAnalysisCache.clear();
+}
+
+function hashCacheKey(input: string): string {
+  let h1 = 0x811c9dc5;
+  let h2 = 0x811c9dc5;
+  for (let i = 0; i < input.length; i += 1) {
+    const c = input.charCodeAt(i);
+    h1 ^= c;
+    h1 = Math.imul(h1, 0x01000193);
+    h2 ^= c + i;
+    h2 = Math.imul(h2, 0x01000193);
+  }
+  return `${(h1 >>> 0).toString(16)}-${(h2 >>> 0).toString(16)}-${input.length}`;
+}
 const SEVERITY_RANK: Record<ClauseSeverity, number> = {
   low: 1,
   medium: 2,
@@ -167,6 +189,56 @@ export async function probeChromeNanoAvailability(
   } catch {
     return 'unsupported';
   }
+}
+
+const CUAD_HINT_PATTERNS: Array<{ label: string; regex: RegExp }> = [
+  { label: 'hold harmless', regex: /\bhold\s+harmless\b/i },
+  { label: 'perpetual', regex: /\bperpetual\b/i },
+  { label: 'irrevocable', regex: /\birrevocable\b/i },
+  { label: 'auto-renew', regex: /\bauto-?renew(?:al|s|ing)?\b/i },
+  { label: 'evergreen', regex: /\bevergreen\b/i },
+  { label: 'arbitration', regex: /\barbitration\b/i },
+  { label: 'class action', regex: /\bclass\s+action\b/i },
+  { label: 'most favored', regex: /\bmost\s+favored\b/i },
+  { label: 'liquidated damages', regex: /\bliquidated\s+damages\b/i },
+  { label: 'change of control', regex: /\bchange\s+of\s+control\b/i },
+  { label: 'sole discretion', regex: /\bsole\s+discretion\b/i }
+];
+
+export function extractCuadHints(text: string): string[] {
+  const hints: string[] = [];
+  for (const { label, regex } of CUAD_HINT_PATTERNS) {
+    if (regex.test(text)) {
+      hints.push(label);
+    }
+  }
+  return hints;
+}
+
+export function extractDefinedTerms(text: string, maxTerms = 8): string[] {
+  const seen = new Set<string>();
+  const terms: string[] = [];
+  const addTerm = (raw: string) => {
+    const cleaned = raw.trim().replace(/\s+/g, ' ');
+    if (!cleaned || cleaned.length > 40) return;
+    const key = cleaned.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    terms.push(cleaned);
+  };
+
+  const meansRegex = /["“]([A-Z][A-Za-z0-9\s-]{1,40})["”]\s+means\b/g;
+  let match: RegExpExecArray | null;
+  while ((match = meansRegex.exec(text)) !== null && terms.length < maxTerms) {
+    addTerm(match[1]);
+  }
+
+  const parenRegex = /\b[A-Z][A-Za-z0-9\s-]{1,40}\s*\((?:the\s+)?["“]([A-Z][A-Za-z0-9\s-]{1,40})["”]\)/g;
+  while ((match = parenRegex.exec(text)) !== null && terms.length < maxTerms) {
+    addTerm(match[1]);
+  }
+
+  return terms.slice(0, maxTerms);
 }
 
 /**
@@ -254,7 +326,34 @@ export function chunkDocumentText(
   flushCurrent();
 
   const wasTruncated = chunks.length > maxChunks;
-  const boundedChunks = wasTruncated ? chunks.slice(0, maxChunks) : chunks;
+  const rawBoundedChunks = wasTruncated ? chunks.slice(0, maxChunks) : chunks;
+  const overlapChars = Math.min(
+    DEFAULT_CHUNK_OVERLAP_CHARS,
+    Math.floor(maxCharsPerChunk * 0.25)
+  );
+  const definedTerms =
+    rawBoundedChunks.length > 1 ? extractDefinedTerms(trimmed, 8) : [];
+  const definedTermsHeader =
+    definedTerms.length > 0
+      ? `[DEFINED_TERMS: ${definedTerms.join(', ')}]\n\n`
+      : '';
+
+  const boundedChunks = rawBoundedChunks.map((chunk, idx) => {
+    if (idx === 0) return chunk;
+    const prev = rawBoundedChunks[idx - 1];
+    let overlapSlice = '';
+    if (overlapChars > 0 && prev.length > 0) {
+      const rawTail = prev.slice(Math.max(0, prev.length - overlapChars));
+      const boundaryMatch = rawTail.match(/\s/);
+      overlapSlice =
+        boundaryMatch && boundaryMatch.index !== undefined
+          ? rawTail.slice(boundaryMatch.index + 1).trim()
+          : rawTail.trim();
+    }
+    const withOverlap =
+      overlapSlice.length > 0 ? `${overlapSlice}\n\n${chunk}` : chunk;
+    return definedTermsHeader ? `${definedTermsHeader}${withOverlap}` : withOverlap;
+  });
 
   return {
     chunks: boundedChunks,
@@ -273,7 +372,9 @@ export function buildSemanticPiiPrompt(redactedText: string): string {
     'Return ONLY valid JSON: { "entities": [{ "value": "...", "category": "PERSON" | "ORG" | "CODENAME" }] }.',
     '',
     'DOCUMENT:',
-    redactedText.slice(0, 8000)
+    redactedText.length > 8000
+      ? `${redactedText.slice(0, 4000)}\n...\n${redactedText.slice(-4000)}`
+      : redactedText
   ].join('\n');
 }
 
@@ -285,13 +386,38 @@ export function buildTriagePrompt(
     chunkMeta && chunkMeta.total > 1
       ? `SECTION CHUNK ${chunkMeta.index + 1} OF ${chunkMeta.total}:`
       : 'DOCUMENT (PII-REDACTED):';
+  const cuadHints = extractCuadHints(redactedText);
+  const cuadHintsLine =
+    cuadHints.length > 0 ? `[CUAD_HINTS: ${cuadHints.join(', ')}]` : null;
+  const definedTerms = extractDefinedTerms(redactedText, 10);
+  const definedTermsLine =
+    definedTerms.length > 0
+      ? `[DEFINED_TERMS: ${definedTerms.join(', ')}]`
+      : null;
 
   return [
-    'You are LocalShield, a privacy-first contract and policy risk analyzer.',
+    'You are LocalShield, an adversarial privacy-first contract and policy risk analyzer representing the reviewing/receiving party against drafter-favorable terms.',
     'Analyze the following PII-redacted document and return ONLY valid JSON matching the schema.',
-    'Identify risky clauses (liability, AI data training, auto-renewal, arbitration, unilateral modifications, breach delays), assign severity (critical/high/medium/low), quote short excerpts, explain rationale, and propose concrete redline counter-language.',
-    'Also include crossClauseFindings if multiple clauses create compound risk.',
+    'Systematically audit against the CUAD high-risk legal taxonomy, actively hunting for buried, euphemistic, definitional, or cross-referenced traps:',
+    '1) Uncapped / Asymmetric Indemnification (e.g., "hold harmless without limitation" or one-sided carve-outs)',
+    '2) Irrevocable / Perpetual IP & AI Training Licenses (e.g., "worldwide, royalty-free, sublicensable license to improve services/models")',
+    '3) Silent Evergreen Auto-Renewal (e.g., "successive terms unless written notice 60-90 days prior")',
+    '4) Most Favored Nation (MFN) / Price Parity clauses',
+    '5) Change-of-Control / Anti-Assignment restrictions',
+    '6) Unilateral Modification via URL (e.g., "posted at [URL], continued use constitutes acceptance")',
+    '7) Liquidated Damages / Disproportionate Penalties',
+    '8) Mandatory Arbitration & Class-Action Waiver',
+    '9) Non-Compete / Non-Solicit / Exclusivity restraints',
+    '10) Delayed Breach Notification (e.g., "commercially reasonable time" or >72h notice)',
+    'Follow the Evidence -> Legal Impact -> Counter-Proposal chain for every finding:',
+    '- Evidence (excerpt): quote a short, exact verbatim substring from the document; never paraphrase or fabricate.',
+    '- Legal Impact (rationale): explain the concrete financial/IP/liability exposure, any defined-term or cross-clause interaction, and worst-case scenario for the reviewing party.',
+    '- Counter-Proposal (redlineProposal): provide drop-in replacement contract language (mutual caps, notice windows, explicit carve-outs) rather than generic advice.',
+    '- Calibrate severity strictly: critical (uncapped liability, perpetual IP/AI license, unilateral termination/modification), high (asymmetric indemnity, silent auto-renewal, MFN, >72h breach notice), medium (ambiguous SLA/cure), low (minor boilerplate).',
+    'Also include crossClauseFindings if multiple clauses or defined terms create compound risk.',
     '',
+    ...(cuadHintsLine ? [cuadHintsLine] : []),
+    ...(definedTermsLine ? [definedTermsLine] : []),
     chunkLine,
     redactedText
   ].join('\n');
@@ -304,31 +430,70 @@ export function buildEscalationPrompt(
   const clauseList = triageSummary.clauses
     .map((c) => `- [${c.severity.toUpperCase()}] ${c.id}: ${c.title} (${c.category})`)
     .join('\n');
+  const cuadHints = extractCuadHints(redactedText);
+  const cuadHintsLine =
+    cuadHints.length > 0 ? `[CUAD_HINTS: ${cuadHints.join(', ')}]` : null;
+  const definedTerms = extractDefinedTerms(redactedText, 12);
+  const definedTermsLine =
+    definedTerms.length > 0
+      ? `[DEFINED_TERMS: ${definedTerms.join(', ')}]`
+      : null;
 
   return [
-    'You are LocalShield Cloud Escalation Reviewer. The user explicitly consented to send ONLY this PII-redacted text for deep multi-clause cross-referencing.',
-    'Perform cross-clause contradiction analysis, compound liability interactions, regulatory compliance gaps (GDPR, CCPA, SOC 2), and executive negotiation strategy.',
+    'You are LocalShield Cloud Escalation Reviewer, acting as a senior adversarial counsel representing the reviewing/receiving party. The user explicitly consented to send ONLY this PII-redacted text for deep multi-clause cross-referencing.',
+    'Execute a two-step Adversarial Verification & Deep Audit:',
+    'STEP 1 — AUDIT STAGE 1 TRIAGE: Verify every Stage 1 finding against the full text. Confirm verbatim excerpts exist, upgrade/downgrade severity where Stage 1 missed compound risk or over-flagged standard boilerplate, and sharpen redlines into drop-in contract language.',
+    'STEP 2 — HUNT FOR BURIED & CROSS-CLAUSE TRAPS: Resolve all [DEFINED_TERMS] across sections (e.g., Customer Data, Confidential Information, Affiliates, Services) and audit for traps Stage 1 missed: uncapped/asymmetric indemnification, limitation-of-liability carve-outs, irrevocable/perpetual IP & AI training licenses, silent evergreen auto-renewal, MFN, change-of-control/anti-assignment, unilateral modification via URL, liquidated damages, mandatory arbitration & class-action waiver, non-compete/non-solicit, delayed breach notification (>72h), survival traps, and regulatory gaps (GDPR, CCPA, SOC 2).',
+    'For every finding, enforce Evidence (exact verbatim excerpt) -> Legal Impact (exposure + cross-clause/defined-term interaction) -> Counter-Proposal (drop-in redline language).',
     'Return ONLY valid JSON matching the schema, including crossClauseFindings.',
     '',
+    ...(cuadHintsLine ? [cuadHintsLine] : []),
+    ...(definedTermsLine ? [definedTermsLine] : []),
     'STAGE 1 ON-DEVICE TRIAGE FINDINGS:',
     clauseList || '- None detected in initial triage.',
     '',
     'FULL DOCUMENT (PII-REDACTED):',
-    redactedText.slice(0, 28000)
+    redactedText.slice(0, 40000)
   ].join('\n');
+}
+
+function extractFirstJsonObject(rawText: string): string {
+  const start = rawText.indexOf('{');
+  if (start === -1) return rawText.trim();
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < rawText.length; i += 1) {
+    const ch = rawText[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === '\\') {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+    } else if (ch === '{') {
+      depth += 1;
+    } else if (ch === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        return rawText.slice(start, i + 1).trim();
+      }
+    }
+  }
+  return rawText.slice(start).trim();
 }
 
 function parseSemanticPiiResponse(rawText: string): SemanticPiiEntity[] {
   const fenced = rawText.match(/```(?:json)?\s*([\s\S]*?)```/i);
   const candidate = fenced?.[1]
     ? fenced[1].trim()
-    : (() => {
-        const first = rawText.indexOf('{');
-        const last = rawText.lastIndexOf('}');
-        return first !== -1 && last > first
-          ? rawText.slice(first, last + 1).trim()
-          : rawText.trim();
-      })();
+    : extractFirstJsonObject(rawText);
 
   try {
     const parsed = JSON.parse(candidate) as { entities?: unknown };
@@ -372,7 +537,16 @@ function mergeChunkAnalyses(
       maxScore = analysis.overallRiskScore;
     }
     for (const clause of analysis.clauses) {
-      const key = `${clause.category.toLowerCase()}::${clause.title.toLowerCase()}`;
+      const normalizedExcerpt = clause.excerpt
+        .trim()
+        .toLowerCase()
+        .replace(/\s+/g, ' ')
+        .slice(0, 240);
+      const normalizedTitle = clause.title
+        .trim()
+        .toLowerCase()
+        .replace(/\s+/g, ' ');
+      const key = `${clause.category.toLowerCase()}::${normalizedTitle}::${normalizedExcerpt}`;
       const existing = clauseMap.get(key);
       if (
         !existing ||
@@ -392,24 +566,45 @@ function mergeChunkAnalyses(
     }
   }
 
+  const mergedClauses = Array.from(clauseMap.values());
+  const rawClauseScore = mergedClauses.reduce((sum, c) => {
+    const weight =
+      c.severity === 'critical'
+        ? 28
+        : c.severity === 'high'
+          ? 18
+          : c.severity === 'medium'
+            ? 10
+            : 4;
+    return sum + weight;
+  }, 0);
+  const calibratedClauseScore =
+    rawClauseScore > 0
+      ? Math.round(100 * (1 - Math.exp(-rawClauseScore / 95)))
+      : 0;
+  const overallRiskScore =
+    mergedClauses.length > 0
+      ? Math.min(100, Math.max(maxScore, calibratedClauseScore))
+      : maxScore;
+
   const riskPosture: DocumentAnalysisResult['riskPosture'] =
-    maxScore >= 75
+    overallRiskScore >= 75
       ? 'Critical'
-      : maxScore >= 50
+      : overallRiskScore >= 50
         ? 'Elevated'
-        : maxScore >= 25
+        : overallRiskScore >= 25
           ? 'Moderate'
           : 'Low';
 
   return {
     documentType: analyses[0].documentType,
-    overallRiskScore: maxScore,
+    overallRiskScore,
     riskPosture,
     executiveSummary: analyses
       .map((a) => a.executiveSummary)
       .filter((s, idx, arr) => arr.indexOf(s) === idx)
       .join(' '),
-    clauses: Array.from(clauseMap.values()),
+    clauses: mergedClauses,
     crossClauseFindings: Array.from(crossMap.values()),
     complianceFlags: Array.from(complianceSet)
   };
@@ -465,28 +660,45 @@ async function invokeModelWithStreaming(
     signal?: AbortSignal;
     onStreamChunk?: (chunkText: string, stage: PipelineStage) => void;
     stage: PipelineStage;
+    timeoutMs?: number;
   }
 ): Promise<{ response: HybridModelResponse; streamed: boolean }> {
   throwIfAborted(options.signal);
-  const reqOpts = options.signal ? { signal: options.signal } : undefined;
-
-  if (typeof model.generateContentStream === 'function') {
-    const streamResult = await model.generateContentStream(request, reqOpts);
-    for await (const chunk of streamResult.stream) {
-      throwIfAborted(options.signal);
-      const piece = chunk.text();
-      if (piece) {
-        options.onStreamChunk?.(piece, options.stage);
-      }
-    }
-    const response = await streamResult.response;
-    throwIfAborted(options.signal);
-    return { response, streamed: true };
+  const timeoutMs = options.timeoutMs ?? 45000;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => {
+    controller.abort(new Error(`Model invocation timed out after ${timeoutMs}ms`));
+  }, timeoutMs);
+  const onParentAbort = () => controller.abort(options.signal?.reason);
+  if (options.signal) {
+    options.signal.addEventListener('abort', onParentAbort, { once: true });
   }
+  const reqOpts = { signal: controller.signal };
 
-  const result = await model.generateContent(request, reqOpts);
-  throwIfAborted(options.signal);
-  return { response: result.response, streamed: false };
+  try {
+    if (typeof model.generateContentStream === 'function') {
+      const streamResult = await model.generateContentStream(request, reqOpts);
+      for await (const chunk of streamResult.stream) {
+        throwIfAborted(controller.signal);
+        const piece = chunk.text();
+        if (piece) {
+          options.onStreamChunk?.(piece, options.stage);
+        }
+      }
+      const response = await streamResult.response;
+      throwIfAborted(controller.signal);
+      return { response, streamed: true };
+    }
+
+    const result = await model.generateContent(request, reqOpts);
+    throwIfAborted(controller.signal);
+    return { response: result.response, streamed: false };
+  } finally {
+    clearTimeout(timeoutId);
+    if (options.signal) {
+      options.signal.removeEventListener('abort', onParentAbort);
+    }
+  }
 }
 
 async function probeTokenBudget(
@@ -539,9 +751,11 @@ export function computeHybridDelta(
   escalation: DocumentAnalysisResult | null,
   triageTelemetry: RunTelemetry,
   escalationTelemetry: RunTelemetry | null,
-  semanticPii?: SemanticPiiReport
+  semanticPii?: SemanticPiiReport,
+  redactionLatencyMs = 0
 ): HybridDelta {
   const totalLatencyMs =
+    redactionLatencyMs +
     (semanticPii?.latencyMs ?? 0) +
     triageTelemetry.latencyMs +
     (escalationTelemetry?.latencyMs ?? 0);
@@ -683,6 +897,63 @@ export async function runHybridDocumentAnalysis(
     customTerms: options.customTerms
   });
 
+  const cacheKey = hashCacheKey(
+    [
+      redaction.redactedText,
+      options.policyMode,
+      String(options.runCloudEscalation),
+      String(Boolean(options.enableSemanticPii)),
+      String(options.isOnline),
+      String(options.useSimulatedSandbox),
+      options.chromeNanoAvailability,
+      options.cloudModelName,
+      String(options.maxCharsPerChunk ?? DEFAULT_TRIAGE_CHUNK_CHARS),
+      String(options.maxChunks ?? DEFAULT_MAX_CHUNKS),
+      JSON.stringify(
+        (options.inlineAttachments ?? []).map((att) => {
+          const mid = Math.max(0, Math.floor(att.data.length / 2) - 32);
+          const digest =
+            att.data.slice(0, 64) +
+            att.data.slice(mid, mid + 64) +
+            att.data.slice(-64);
+          return {
+            name: att.name ?? '',
+            mimeType: att.mimeType,
+            length: att.data.length,
+            digest
+          };
+        })
+      )
+    ].join('|')
+  );
+
+  if (!options.bypassCache) {
+    const cached = hybridAnalysisCache.get(cacheKey);
+    if (cached) {
+      hybridAnalysisCache.delete(cacheKey);
+      hybridAnalysisCache.set(cacheKey, cached);
+      options.onStageChange?.('complete');
+      return {
+        ...cached,
+        notes: [
+          ...cached.notes,
+          'cached: true — deterministic content-hash cache hit (<5ms).'
+        ]
+      };
+    }
+  }
+
+  const cacheAndReturn = (report: HybridExecutionReport): HybridExecutionReport => {
+    if (hybridAnalysisCache.size >= MAX_HYBRID_CACHE_ENTRIES) {
+      const oldestKey = hybridAnalysisCache.keys().next().value;
+      if (oldestKey !== undefined) {
+        hybridAnalysisCache.delete(oldestKey);
+      }
+    }
+    hybridAnalysisCache.set(cacheKey, report);
+    return report;
+  };
+
   // Stage 0.5: Optional On-Device Semantic PII Scrubbing (strictly ONLY_ON_DEVICE)
   let semanticPii: SemanticPiiReport = {
     status: 'skipped',
@@ -708,7 +979,10 @@ export async function runHybridDocumentAnalysis(
         status: 'unavailable',
         entitiesAdded: 0,
         latencyMs: 0,
-        reason: `Chrome Gemini Nano status is "${options.chromeNanoAvailability}"; on-device semantic PII scrubbing skipped.`
+        reason:
+          options.chromeNanoAvailability === 'downloadable'
+            ? 'Chrome Gemini Nano is downloadable; initialize the on-device model to enable Stage 0.5 semantic PII scrubbing.'
+            : `Chrome Gemini Nano status is "${options.chromeNanoAvailability}"; on-device semantic PII scrubbing skipped.`
       };
     } else {
       try {
@@ -792,14 +1066,20 @@ export async function runHybridDocumentAnalysis(
         options.inlineAttachments
       );
 
-      const tokenProbe = await probeTokenBudget(
-        model,
-        firstRequest,
-        redaction.redactedText
-      );
+      const shouldProbeTokens =
+        options.policyMode === 'only_on_device' ||
+        (chunked.chunkCount > 1 && options.policyMode !== 'only_in_cloud');
+
+      const tokenProbe = shouldProbeTokens
+        ? await probeTokenBudget(model, firstRequest, redaction.redactedText)
+        : {
+            tokens: Math.ceil(redaction.redactedText.length / 4),
+            source: 'estimated' as const
+          };
       chunkInfo = {
         ...chunkInfo,
-        estimatedTokens: tokenProbe.tokens,
+        estimatedTokens:
+          chunked.chunkCount === 1 ? tokenProbe.tokens : chunked.estimatedTokens,
         tokenProbeSource: tokenProbe.source
       };
 
@@ -813,7 +1093,7 @@ export async function runHybridDocumentAnalysis(
       let resolvedSource: 'on_device' | 'in_cloud' = 'in_cloud';
       let anyStreamed = false;
 
-      for (let i = 0; i < chunked.chunks.length; i += 1) {
+      const runChunk = async (i: number) => {
         throwIfAborted(options.signal);
         const prompt =
           i === 0
@@ -825,7 +1105,7 @@ export async function runHybridDocumentAnalysis(
         const request =
           i === 0
             ? firstRequest
-            : buildMultimodalContentParts(prompt, undefined);
+            : buildMultimodalContentParts(prompt, options.inlineAttachments);
 
         const { response, streamed } = await invokeModelWithStreaming(
           model,
@@ -853,8 +1133,36 @@ export async function runHybridDocumentAnalysis(
           totalUsageTokens += response.usageMetadata.totalTokenCount;
         }
 
-        chunkResults.push(
-          parseStructuredAnalysis(rawOutput, chunked.chunks[i])
+        return {
+          analysis: parseStructuredAnalysis(rawOutput, chunked.chunks[i]),
+          source: normalizeInferenceSource(response.inferenceSource)
+        };
+      };
+
+      const chunkSources = new Set<'on_device' | 'in_cloud'>();
+      if (
+        chunked.chunkCount > 1 &&
+        (options.policyMode === 'only_in_cloud' ||
+          options.policyMode === 'prefer_in_cloud')
+      ) {
+        const concurrentResults = await Promise.all(
+          chunked.chunks.map((_, i) => runChunk(i))
+        );
+        for (const item of concurrentResults) {
+          chunkResults.push(item.analysis);
+          chunkSources.add(item.source);
+        }
+      } else {
+        for (let i = 0; i < chunked.chunks.length; i += 1) {
+          const item = await runChunk(i);
+          chunkResults.push(item.analysis);
+          chunkSources.add(item.source);
+        }
+      }
+      resolvedSource = chunkSources.has('in_cloud') ? 'in_cloud' : 'on_device';
+      if (chunkSources.size > 1) {
+        notes.push(
+          'Multi-chunk triage used mixed on-device and in-cloud inference; reported source reflects cloud participation.'
         );
       }
 
@@ -871,7 +1179,9 @@ export async function runHybridDocumentAnalysis(
       const fallbackReason =
         options.policyMode === 'prefer_on_device' && resolvedSource === 'in_cloud'
           ? `Chrome Gemini Nano status was "${options.chromeNanoAvailability}"; Firebase AI Logic automatically fell back to ${options.cloudModelName}.`
-          : undefined;
+          : options.policyMode === 'prefer_in_cloud' && resolvedSource === 'on_device'
+            ? `Cloud inference was unavailable or offline; Firebase AI Logic fell back to on-device execution.`
+            : undefined;
 
       triageTelemetry = {
         stage: 'triage',
@@ -1042,6 +1352,12 @@ export async function runHybridDocumentAnalysis(
       notes.push(dedupReason);
     } else if (options.modelFactory && !options.useSimulatedSandbox) {
       const escStart = now();
+      if (redaction.redactedText.length > 40000) {
+        chunkInfo = { ...chunkInfo, wasTruncated: true };
+        notes.push(
+          'Stage 2 Cloud Escalation input was truncated at 40,000 characters.'
+        );
+      }
       const escPrompt = buildEscalationPrompt(redaction.redactedText, triage);
       const escRequest = buildMultimodalContentParts(
         escPrompt,
@@ -1136,7 +1452,7 @@ export async function runHybridDocumentAnalysis(
 
   options.onStageChange?.('complete');
 
-  return {
+  return cacheAndReturn({
     redaction,
     semanticPii,
     chunkInfo,
@@ -1148,7 +1464,7 @@ export async function runHybridDocumentAnalysis(
     notes,
     escalationBlockedReason,
     cloudDegradation
-  };
+  });
 }
 
 export interface ClauseNegotiatorParams {
@@ -1223,6 +1539,9 @@ export function createClauseNegotiator(
     if (!params.modelFactory || params.useSimulatedSandbox) {
       return null;
     }
+    if (!params.isOnline && params.chromeNanoAvailability !== 'available') {
+      return null;
+    }
     const model = params.modelFactory(effectiveMode, 'negotiation_chat');
     if (typeof model.startChat !== 'function') {
       return null;
@@ -1289,20 +1608,39 @@ export function createClauseNegotiator(
     let response: HybridModelResponse;
     let streamed = false;
 
-    if (typeof chat.sendMessageStream === 'function') {
-      const streamRes = await chat.sendMessageStream(userMessage, reqOpts);
-      for await (const chunk of streamRes.stream) {
-        throwIfAborted(turnOptions?.signal);
-        const piece = chunk.text();
-        if (piece) {
-          turnOptions?.onStreamChunk?.(piece);
+    try {
+      if (typeof chat.sendMessageStream === 'function') {
+        const streamRes = await chat.sendMessageStream(userMessage, reqOpts);
+        for await (const chunk of streamRes.stream) {
+          throwIfAborted(turnOptions?.signal);
+          const piece = chunk.text();
+          if (piece) {
+            turnOptions?.onStreamChunk?.(piece);
+          }
         }
+        response = await streamRes.response;
+        streamed = true;
+      } else {
+        const res = await chat.sendMessage(userMessage, reqOpts);
+        response = res.response;
       }
-      response = await streamRes.response;
-      streamed = true;
-    } else {
-      const res = await chat.sendMessage(userMessage, reqOpts);
-      response = res.response;
+    } catch (err) {
+      if (
+        (err instanceof Error && err.name === 'AbortError') ||
+        turnOptions?.signal?.aborted
+      ) {
+        history.pop();
+        throw err;
+      }
+      const fallbackReply: ClauseNegotiationMessage = {
+        role: 'model',
+        text: buildOfflineNegotiationFallback(params.clause, userMessage),
+        inferenceSource: 'local_heuristic',
+        streamed: false,
+        timestamp: new Date().toISOString()
+      };
+      history.push(fallbackReply);
+      return fallbackReply;
     }
 
     throwIfAborted(turnOptions?.signal);

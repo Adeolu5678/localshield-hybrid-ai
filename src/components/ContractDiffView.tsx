@@ -97,21 +97,22 @@ export function ContractDiffView({
           aria-label="Word-level redline diff"
         >
           {diffSegments.map((seg, idx) => {
+            const segKey = `${idx}-${seg.kind}`;
             if (seg.kind === 'delete') {
               return (
-                <del key={idx} className="diff-del">
+                <del key={segKey} className="diff-del">
                   {seg.text}
                 </del>
               );
             }
             if (seg.kind === 'insert') {
               return (
-                <ins key={idx} className="diff-ins">
+                <ins key={segKey} className="diff-ins">
                   {seg.text}
                 </ins>
               );
             }
-            return <span key={idx}>{seg.text}</span>;
+            return <span key={segKey}>{seg.text}</span>;
           })}
         </div>
       ) : (
