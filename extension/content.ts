@@ -1047,6 +1047,9 @@ function getShadowStyles(): string {
 .le-draft-input::placeholder {
   color: #6B7280;
 }
+.le-companion-input {
+  max-height: 68px;
+}
 .le-draft-submit {
   width: 28px;
   height: 28px;
@@ -1843,6 +1846,62 @@ function insertDraftIntoTarget(el: HTMLElement, text: string): void {
 
 const companionExplanationCache = new Map<string, string>();
 
+function clearCompanionHighlight(): void {
+  document.querySelectorAll('mark.le-companion-active-sel').forEach((mark) => {
+    const parent = mark.parentNode;
+    if (!parent) return;
+    while (mark.firstChild) {
+      parent.insertBefore(mark.firstChild, mark);
+    }
+    parent.removeChild(mark);
+    parent.normalize();
+  });
+}
+
+function createCompanionMark(): HTMLElement {
+  const mark = document.createElement('mark');
+  mark.className = 'le-companion-active-sel';
+  mark.style.cssText = 'background:rgba(11,79,58,0.12);color:inherit;border-radius:3px;padding:0 2px;';
+  return mark;
+}
+
+function highlightCompanionRange(range: Range): void {
+  clearCompanionHighlight();
+  const mark = createCompanionMark();
+  try {
+    range.surroundContents(mark);
+  } catch {
+    const frag = range.extractContents();
+    mark.appendChild(frag);
+    range.insertNode(mark);
+  }
+}
+
+function navigateToSectionInDom(sectionQuery: string): string | null {
+  const escaped = sectionQuery.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const headingRe = new RegExp(`(?:^|\\b)(?:section\\s+)?${escaped}(?:\\b|\\.|\\s|$)`, 'i');
+  const candidates = Array.from(
+    document.querySelectorAll<HTMLElement>('h1, h2, h3, h4, h5, h6, p, li, dt, div, section'),
+  );
+  let targetEl: HTMLElement | null = null;
+  for (const el of candidates) {
+    if (el.closest('#legalease-root')) continue;
+    const text = (el.innerText || '').trim();
+    if (!text || text.length > 2500) continue;
+    if (headingRe.test(text.slice(0, 120))) {
+      targetEl = el;
+      break;
+    }
+  }
+  if (!targetEl) return null;
+
+  targetEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  const range = document.createRange();
+  range.selectNodeContents(targetEl);
+  highlightCompanionRange(range);
+  return (targetEl.innerText || '').trim().slice(0, 4000);
+}
+
 function formatCompanionText(text: string): string {
   return escapeHtml(text).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
 }
@@ -1851,7 +1910,7 @@ async function explainSelection(selectedText: string, followUpQuestion?: string)
   const runtime = chrome.runtime as unknown as {
     sendMessage: (msg: unknown) => Promise<{ ok?: boolean; text?: string; error?: string } | undefined>;
   };
-  const documentContext = (document.body?.innerText || '').trim().slice(0, 12000);
+  const documentContext = (document.body?.innerText || '').trim().slice(0, 45000);
   const response = await runtime.sendMessage({
     type: 'LEGALEASE_COMPANION_EXPLAIN',
     selectedText,
@@ -1987,6 +2046,9 @@ function renderDraftLayer(shadow: ShadowRoot): void {
       `;
       updateDraftPositions(shadow);
       layer.querySelector<HTMLButtonElement>('.le-companion-pill')?.addEventListener('click', () => {
+        if (!companionState.isEditable && companionState.savedRange) {
+          highlightCompanionRange(companionState.savedRange);
+        }
         const cached = companionExplanationCache.get(companionState.selectedText);
         if (cached) {
           companionState.isOpen = true;
@@ -2107,6 +2169,15 @@ function renderDraftLayer(shadow: ShadowRoot): void {
         companionState.isExplaining = true;
         renderDraftLayer(shadow);
         try {
+          const navMatch =
+            query.match(/\b(?:navigate|go|jump|scroll)\s+to\s+(?:section\s+)?([a-z0-9.]+)/i) ||
+            query.match(/\bsection\s+([0-9]+(?:\.[0-9]+)*)/i);
+          if (navMatch?.[1]) {
+            const sectionText = navigateToSectionInDom(navMatch[1]);
+            if (sectionText) {
+              companionState.selectedText = sectionText;
+            }
+          }
           companionState.explanation = await explainSelection(companionState.selectedText, query);
           companionState.prompt = '';
         } catch (err: unknown) {
@@ -2118,12 +2189,20 @@ function renderDraftLayer(shadow: ShadowRoot): void {
       }
     };
 
+    const syncInputHeight = () => {
+      if (!input) return;
+      input.style.height = 'auto';
+      input.style.height = `${Math.min(input.scrollHeight, 68)}px`;
+    };
+    syncInputHeight();
+
     input?.addEventListener('mousedown', (e: MouseEvent) => {
       e.stopPropagation();
     });
     input?.addEventListener('input', () => {
       companionState.prompt = input.value;
       submitBtn?.classList.toggle('visible', input.value.trim().length > 0);
+      syncInputHeight();
     });
     input?.addEventListener('keydown', (e: KeyboardEvent) => {
       if (e.key === 'Enter' && !e.shiftKey) {
@@ -2131,6 +2210,7 @@ function renderDraftLayer(shadow: ShadowRoot): void {
         void runCompanionPrompt();
       } else if (e.key === 'Escape') {
         e.preventDefault();
+        clearCompanionHighlight();
         companionState.isActive = false;
         companionState.isOpen = false;
         renderDraftLayer(shadow);
@@ -2147,6 +2227,7 @@ function renderDraftLayer(shadow: ShadowRoot): void {
       if (companionState.draftText) {
         replaceSelectionInTarget(companionState.draftText);
       }
+      clearCompanionHighlight();
       companionState.isActive = false;
       companionState.isOpen = false;
       companionState.draftText = '';
@@ -2154,6 +2235,7 @@ function renderDraftLayer(shadow: ShadowRoot): void {
       renderDraftLayer(shadow);
     });
     layer.querySelector<HTMLButtonElement>('.le-companion-close')?.addEventListener('click', () => {
+      clearCompanionHighlight();
       companionState.isActive = false;
       companionState.isOpen = false;
       renderDraftLayer(shadow);
@@ -2412,6 +2494,7 @@ function init(): void {
       changed = true;
     }
     if (companionState.isOpen) {
+      clearCompanionHighlight();
       companionState.isActive = false;
       companionState.isOpen = false;
       changed = true;

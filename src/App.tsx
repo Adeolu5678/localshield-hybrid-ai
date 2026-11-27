@@ -29,6 +29,7 @@ import {
   type FirebaseServicesHandle
 } from './lib/firebaseClient';
 import {
+  negotiateClauseTurn,
   probeChromeNanoAvailability,
   runHybridDocumentAnalysis,
   type ModelFactory
@@ -150,6 +151,32 @@ export function App() {
   const [reviewStep, setReviewStep] = useState<'issues' | 'final'>('issues');
   const [privacyDrawerOpen, setPrivacyDrawerOpen] = useState(false);
   const [expandedClauseId, setExpandedClauseId] = useState<string | null>(null);
+  const docBodyRef = useRef<HTMLDivElement | null>(null);
+  const [selectionPill, setSelectionPill] = useState<{
+    text: string;
+    top: number;
+    left: number;
+  } | null>(null);
+  const [selectionExplain, setSelectionExplain] = useState<{
+    text: string;
+    explanation: string;
+    loading: boolean;
+    error: string | null;
+  } | null>(null);
+
+  useEffect(() => {
+    if (!expandedClauseId) return;
+    const mark = document.querySelector<HTMLElement>(
+      `.grammarly-doc-pane mark[data-clause-id="${expandedClauseId}"]`
+    );
+    if (!mark) return;
+    mark.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    mark.classList.add('is-pulsing');
+    const timer = window.setTimeout(() => {
+      mark.classList.remove('is-pulsing');
+    }, 900);
+    return () => window.clearTimeout(timer);
+  }, [expandedClauseId]);
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const [policyMode, setPolicyMode] =
@@ -1625,7 +1652,35 @@ export function App() {
                             );
                           })()}
                         </div>
-                        <div className="grammarly-doc-body">
+                                <div
+                                  className="grammarly-doc-body"
+                                  ref={docBodyRef}
+                                  onMouseUp={() => {
+                                    const sel = window.getSelection();
+                                    const rawText = sel?.toString().trim() ?? '';
+                                    if (
+                                      !sel ||
+                                      sel.isCollapsed ||
+                                      rawText.length < 20 ||
+                                      !docBodyRef.current ||
+                                      !sel.anchorNode ||
+                                      !docBodyRef.current.contains(sel.anchorNode)
+                                    ) {
+                                      setSelectionPill(null);
+                                      return;
+                                    }
+                                    const range = sel.getRangeAt(0);
+                                    const rect = range.getBoundingClientRect();
+                                    setSelectionPill({
+                                      text: rawText,
+                                      top: Math.max(12, rect.top - 42),
+                                      left: Math.min(
+                                        window.innerWidth - 180,
+                                        Math.max(12, rect.left + rect.width / 2 - 75)
+                                      )
+                                    });
+                                  }}
+                                >
                           {(() => {
                             const sourceText = report.redaction.originalText || documentText;
                             const lowerSource = sourceText.toLowerCase();
@@ -1698,6 +1753,7 @@ export function App() {
                                 nodes.push(
                                   <mark
                                     key={`${m.clause.id}-${m.start}`}
+                                    data-clause-id={m.clause.id}
                                     className={`doc-highlight sev-${m.clause.severity}${
                                       isActive ? ' is-active' : ''
                                     }`}
@@ -1726,7 +1782,91 @@ export function App() {
                             return nodes;
                           })()}
                         </div>
+                        {selectionExplain && (
+                          <div className="doc-explain-popover" role="region" aria-label="Selection explanation">
+                            <div className="doc-explain-head">
+                              <span>Plain-English Explanation</span>
+                              <button
+                                type="button"
+                                className="doc-explain-close"
+                                onClick={() => setSelectionExplain(null)}
+                                aria-label="Close explanation"
+                              >
+                                ×
+                              </button>
+                            </div>
+                            <p className="doc-explain-quote">
+                              “{selectionExplain.text.slice(0, 140)}
+                              {selectionExplain.text.length > 140 ? '…' : ''}”
+                            </p>
+                            {selectionExplain.loading ? (
+                              <p className="doc-explain-status">Explaining selection…</p>
+                            ) : selectionExplain.error ? (
+                              <p className="doc-explain-error">{selectionExplain.error}</p>
+                            ) : (
+                              <p className="doc-explain-body">{selectionExplain.explanation}</p>
+                            )}
+                          </div>
+                        )}
                       </div>
+                      {selectionPill && (
+                        <button
+                          type="button"
+                          className="doc-explain-pill"
+                          style={{ top: selectionPill.top, left: selectionPill.left }}
+                          onMouseDown={(e) => e.preventDefault()}
+                          onClick={async () => {
+                            const selectedText = selectionPill.text;
+                            setSelectionPill(null);
+                            setSelectionExplain({
+                              text: selectedText,
+                              explanation: '',
+                              loading: true,
+                              error: null
+                            });
+                            try {
+                              const reply = await negotiateClauseTurn({
+                                clause: {
+                                  id: 'selection-explain',
+                                  title: 'Selected Excerpt',
+                                  severity: 'medium',
+                                  category: 'Selection',
+                                  excerpt: selectedText,
+                                  rationale: 'User-selected excerpt for plain-English explanation.',
+                                  redlineProposal: ''
+                                },
+                                redactedDocumentContext:
+                                  report?.redaction.redactedText || documentText,
+                                modelFactory,
+                                isOnline,
+                                chromeNanoAvailability: chromeAvailability,
+                                policyMode,
+                                useSimulatedSandbox,
+                                userMessage:
+                                  'Explain this selected contract excerpt in plain English: what does it mean, what is the practical risk for the signing party, and what should they watch out for? Keep it concise (3-4 sentences).'
+                              });
+                              setSelectionExplain({
+                                text: selectedText,
+                                explanation: reply.text,
+                                loading: false,
+                                error: null
+                              });
+                            } catch (err) {
+                              setSelectionExplain({
+                                text: selectedText,
+                                explanation: '',
+                                loading: false,
+                                error:
+                                  err instanceof Error
+                                    ? err.message
+                                    : 'Unable to explain selection.'
+                              });
+                            }
+                          }}
+                        >
+                          Explain Selection
+                        </button>
+                      )}
 
                       <div className="grammarly-issues-pane">
                         {activeAnalysis.clauses.length > 0 && (

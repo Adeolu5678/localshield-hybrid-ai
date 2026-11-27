@@ -29,6 +29,9 @@ Founders, security engineers, and legal reviewers paste confidential contracts, 
 - Small on-device models can wrap JSON output in markdown fences or hit context limits on long MSAs; we built `parseStructuredAnalysis()` with fence extraction, `countTokens()`-driven chunking with map-reduce merge, and a deterministic heuristic fallback so the UI stays resilient.
 - Unflagged Chrome browsers default to `unsupported` for `LanguageModel`; we added an inline 30-second **Enable Gemini Nano** drawer in `TelemetryBar.tsx` with one-click flag copy buttons and a live **Re-probe Nano** action (no page reload needed).
 
+### Future Roadmap
+- **Native Desktop LegalEase Companion (macOS/Windows):** A native desktop-wide LegalEase Companion (macOS/Windows) that audits and drafts contracts across any desktop app (Word, Slack, PDFs, email clients) beyond the browser.
+
 ---
 
 ## 2. Judge-Proof <= 3-Minute YouTube Demo Script

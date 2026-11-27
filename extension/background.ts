@@ -86,10 +86,10 @@ chrome.runtime.onMessage.addListener((rawMessage: unknown, _sender, sendResponse
       return false;
     }
     const followUp = (message.followUpQuestion ?? message.question)?.trim();
-    const docContext = message.documentContext?.trim();
+    const docContext = message.documentContext?.trim().slice(0, 45000);
     const contextBlock = docContext ? `Document context:\n${docContext}\n\n` : '';
     const systemInstruction = followUp
-      ? 'You are LegalEase Companion, a direct, conversational legal assistant. Answer the user\'s exact question directly and concisely in plain everyday English using the provided document context and highlighted text. Do not use a "What this means for you / Watch out for" template.'
+      ? 'You are LegalEase Companion, a direct, conversational legal assistant. Answer the user\'s exact question directly and concisely in plain everyday English using the provided document context and highlighted text. If the user asks to navigate to, jump to, or review a specific section (e.g., Section 11.4), locate that section in the document context and explain it clearly. Do not use a "What this means for you / Watch out for" template.'
       : 'You are LegalEase Companion. Explain the highlighted legal text in plain, everyday English — zero legal jargon, max 3-4 short sentences total. Structure your answer with two short parts: "What this means for you:" and "Watch out for:". Be direct, practical, and easy to read.';
     const userPrompt = followUp
       ? `${contextBlock}Highlighted text:\n"${message.selectedText.trim()}"\n\nUser question: ${followUp}`

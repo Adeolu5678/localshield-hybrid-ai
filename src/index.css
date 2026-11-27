@@ -2476,3 +2476,79 @@ header .status-pill,
 .clause-card.is-selected {
   box-shadow: 0 0 0 1px var(--accent, #6366f1);
 }
+
+@keyframes docHighlightPulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(99, 102, 241, 0.55);
+  }
+  70% {
+    box-shadow: 0 0 0 6px rgba(99, 102, 241, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(99, 102, 241, 0);
+  }
+}
+
+.doc-highlight.is-pulsing {
+  animation: docHighlightPulse 0.9s ease-out;
+}
+
+.doc-explain-pill {
+  position: fixed;
+  z-index: 60;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(99, 102, 241, 0.45);
+  background: rgba(15, 23, 42, 0.95);
+  color: #e0e7ff;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35);
+}
+
+.doc-explain-pill:hover {
+  background: rgba(99, 102, 241, 0.28);
+}
+
+.doc-explain-popover {
+  border-top: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+  background: rgba(15, 23, 42, 0.92);
+  padding: 12px 14px;
+  font-size: 0.82rem;
+}
+
+.doc-explain-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.doc-explain-close {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 1rem;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.doc-explain-quote {
+  margin: 0 0 6px;
+  color: var(--muted);
+  font-style: italic;
+  font-size: 0.78rem;
+}
+
+.doc-explain-status,
+.doc-explain-body {
+  margin: 0;
+  line-height: 1.5;
+}
+
+.doc-explain-error {
+  margin: 0;
+  color: #f87171;
+}
