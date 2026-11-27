@@ -809,8 +809,8 @@ header .status-pill,
 .filter-row {
   display: flex;
   align-items: center;
-  justify-content: flex-start;
-  gap: 8px;
+  justify-content: space-between;
+  gap: 10px;
   flex-wrap: nowrap;
   margin-bottom: 14px;
 }
@@ -825,6 +825,7 @@ header .status-pill,
   font-weight: 600;
   white-space: nowrap;
   flex-shrink: 0;
+  margin-left: auto;
   cursor: pointer;
   transition: opacity 0.15s ease;
 }
@@ -835,8 +836,17 @@ header .status-pill,
 
 .filter-pills {
   display: flex;
-  gap: 5px;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
   flex-wrap: nowrap;
+}
+
+.filter-pills::-webkit-scrollbar {
+  display: none;
 }
 
 .filter-pill {
@@ -849,11 +859,6 @@ header .status-pill,
   font-weight: 500;
   white-space: nowrap;
   cursor: pointer;
-}
-
-.filter-row.is-compact .filter-pill {
-  font-size: 0.68rem;
-  padding: 3px 7px;
 }
 
 /* Branded LegalEase Hover Tooltips */

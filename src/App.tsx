@@ -1730,16 +1730,7 @@ export function App() {
 
                       <div className="grammarly-issues-pane">
                         {activeAnalysis.clauses.length > 0 && (
-                          <div
-                            className={`filter-row ${
-                              severityCounts.critical > 0 &&
-                              severityCounts.high > 0 &&
-                              severityCounts.medium > 0 &&
-                              severityCounts.low > 0
-                                ? "is-compact"
-                                : ""
-                            }`}
-                          >
+                          <div className="filter-row">
                             <div className="filter-pills">
                               <button
                                 type="button"
