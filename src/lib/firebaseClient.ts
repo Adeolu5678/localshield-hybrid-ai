@@ -428,7 +428,10 @@ function buildHybridParams(
 
 let inFlightInitPromise: Promise<FirebaseServicesHandle | null> | null = null;
 
-export async function initializeFirebaseServices(): Promise<FirebaseServicesHandle | null> {
+export async function initializeFirebaseServices(
+  options?: { skipAppCheck?: boolean }
+): Promise<FirebaseServicesHandle | null> {
+  const skipAppCheck = Boolean(options?.skipAppCheck);
   const { config, missingEnvKeys } = readFirebaseEnvConfig();
   if (missingEnvKeys.length > 0) {
     return null;
@@ -440,7 +443,8 @@ export async function initializeFirebaseServices(): Promise<FirebaseServicesHand
     appCheckDebugToken: config.appCheckDebugToken,
     appCheckProvider: config.appCheckProvider,
     recaptchaSiteKey: config.recaptchaSiteKey,
-    useLimitedUseAppCheckTokens: config.useLimitedUseAppCheckTokens
+    useLimitedUseAppCheckTokens: config.useLimitedUseAppCheckTokens,
+    skipAppCheck
   });
 
   if (cachedHandle && cachedConfigSignature === configSignature) {
@@ -475,7 +479,15 @@ export async function initializeFirebaseServices(): Promise<FirebaseServicesHand
       config.appCheckDebugToken === 'true' ? true : config.appCheckDebugToken;
   }
 
-  if (config.recaptchaSiteKey) {
+  if (skipAppCheck) {
+    appCheckStatus = {
+      mode: 'unconfigured',
+      initialized: false,
+      limitedUseTokens: config.useLimitedUseAppCheckTokens,
+      tokenVerified: false,
+      note: 'App Check skipped (Chrome MV3 extension CSP).'
+    };
+  } else if (config.recaptchaSiteKey) {
     try {
       const provider =
         config.appCheckProvider === 'recaptcha-v3'

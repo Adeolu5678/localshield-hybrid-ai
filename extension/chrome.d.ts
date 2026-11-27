@@ -5,6 +5,12 @@ declare namespace chrome {
     }): Promise<void>;
   }
 
+  namespace action {
+    const onClicked: {
+      addListener: (callback: (tab: tabs.Tab) => void) => void;
+    };
+  }
+
   namespace tabs {
     interface Tab {
       id?: number;
@@ -16,6 +22,8 @@ declare namespace chrome {
       active?: boolean;
       currentWindow?: boolean;
     }): Promise<Tab[]>;
+
+    function sendMessage(tabId: number, message: unknown): Promise<unknown>;
   }
 
   namespace scripting {
@@ -30,11 +38,21 @@ declare namespace chrome {
   }
 
   namespace runtime {
+    function getURL(path: string): string;
     const onInstalled: {
       addListener: (callback: () => void) => void;
     };
     const onStartup: {
       addListener: (callback: () => void) => void;
+    };
+    const onMessage: {
+      addListener: (
+        callback: (
+          message: unknown,
+          sender: unknown,
+          sendResponse: (response?: unknown) => void,
+        ) => void,
+      ) => void;
     };
   }
 

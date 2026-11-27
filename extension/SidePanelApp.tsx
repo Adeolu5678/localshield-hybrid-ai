@@ -150,6 +150,9 @@ export function SidePanelApp() {
 
   const [isScanningTab, setIsScanningTab] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [showOptions, setShowOptions] = useState(false);
+  const [expandedIds, setExpandedIds] = useState<Record<string, boolean>>({});
+  const [decisions, setDecisions] = useState<Record<string, 'applied' | 'dismissed'>>({});
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [report, setReport] = useState<HybridExecutionReport | null>(null);
@@ -180,7 +183,7 @@ export function SidePanelApp() {
     void probeChromeNanoAvailability().then((status) => {
       if (active) setChromeAvailability(status);
     });
-    void initializeFirebaseServices().then((handle) => {
+    void initializeFirebaseServices({ skipAppCheck: true }).then((handle) => {
       if (!active) return;
       if (handle) {
         setFirebaseHandle(handle);
@@ -245,6 +248,8 @@ export function SidePanelApp() {
       });
       if (controller.signal.aborted) return;
       setReport(executionReport);
+      setExpandedIds({});
+      setDecisions({});
     } catch (err) {
       if (controller.signal.aborted) return;
       setError(
@@ -365,101 +370,126 @@ export function SidePanelApp() {
     >
   ).filter(([, count]) => count > 0);
 
+  const toggleExpanded = (id: string) => {
+    setExpandedIds((prev) => ({ ...prev, [id]: !prev[id] }));
+  };
+
+  const setClauseDecision = (id: string, next?: 'applied' | 'dismissed') => {
+    setDecisions((prev) => {
+      const copy = { ...prev };
+      if (!next) {
+        delete copy[id];
+      } else {
+        copy[id] = next;
+      }
+      return copy;
+    });
+  };
+
   return (
     <div className="sp-shell">
-      <header className="sp-header">
+      <header className="sp-topbar">
         <div className="sp-brand">
-          <div className="sp-mark" aria-hidden="true">
-            LE
-          </div>
-          <div>
-            <h1 className="sp-title">LegalEase</h1>
-            <p className="sp-sub">Side-Panel Legal &amp; Privacy Auditor</p>
-          </div>
+          <img
+            src="icons/legalease-logo.jpg"
+            alt="LegalEase"
+            className="sp-logo"
+          />
+          <h1 className="sp-title">LegalEase</h1>
         </div>
-        <span className="sp-pill sp-pill-emerald mono">
-          {activeRedaction.totalMasked} PII masked
-        </span>
+        <div className="sp-topbar-actions">
+          <button
+            type="button"
+            className="sp-btn-pill"
+            disabled={isScanningTab || isAnalyzing}
+            onClick={() => void handleScanActiveTab()}
+          >
+            {isScanningTab
+              ? 'Scanning...'
+              : isAnalyzing
+                ? 'Auditing...'
+                : 'Scan Active Tab'}
+          </button>
+          <button
+            type="button"
+            className="sp-btn-ghost"
+            aria-expanded={showOptions}
+            onClick={() => setShowOptions((v) => !v)}
+          >
+            Options
+          </button>
+        </div>
       </header>
 
-      <section className="sp-card">
-        <button
-          type="button"
-          className="sp-btn-primary"
-          disabled={isScanningTab || isAnalyzing}
-          onClick={() => void handleScanActiveTab()}
-        >
-          {isScanningTab
-            ? 'Extracting Active Tab...'
-            : isAnalyzing
-              ? 'Running Hybrid Audit...'
-              : 'Scan Active Tab'}
-        </button>
+      {showOptions && (
+        <section className="sp-card">
+          <label>
+            <span className="sp-label">Policy Mode</span>
+            <select
+              className="sp-select"
+              value={policyChoice}
+              onChange={(e) => {
+                const next = e.target.value as SidePanelPolicyChoice;
+                setPolicyChoice(next);
+                if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+                  void chrome.storage.local
+                    .set({ policyChoice: next })
+                    .catch(() => {});
+                }
+              }}
+            >
+              <option value="prefer_on_device">Prefer On-Device</option>
+              <option value="only_on_device">Strict Air-Gap (Nano Only)</option>
+              <option value="hybrid_escalation">Hybrid Escalation</option>
+            </select>
+          </label>
 
+          <label>
+            <span className="sp-label">Custom Redaction Terms</span>
+            <input
+              type="text"
+              className="sp-input"
+              value={customTermsInput}
+              onChange={(e) => {
+                const next = e.target.value;
+                setCustomTermsInput(next);
+                if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+                  void chrome.storage.local
+                    .set({ customTermsInput: next })
+                    .catch(() => {});
+                }
+              }}
+              placeholder="Comma-separated names, orgs, or IDs..."
+            />
+          </label>
+
+          <label className="sp-checkbox">
+            <input
+              type="checkbox"
+              checked={enableSemanticPii}
+              onChange={(e) => setEnableSemanticPii(e.target.checked)}
+            />
+            <span>Stage 0.5 Semantic PII (On-Device PERSON/ORG scrub)</span>
+          </label>
+
+          <label className="sp-checkbox">
+            <input
+              type="checkbox"
+              checked={forceSandbox}
+              onChange={(e) => setForceSandbox(e.target.checked)}
+            />
+            <span>Sandbox Mode (Simulated local heuristic)</span>
+          </label>
+        </section>
+      )}
+
+      <section className="sp-card">
         {pageTitle && (
           <div className="sp-page-meta">
             <strong>{pageTitle}</strong>
             {pageUrl && <span className="sp-page-url mono">{pageUrl}</span>}
           </div>
         )}
-
-        <label>
-          <span className="sp-label">Policy Mode</span>
-          <select
-            className="sp-select"
-            value={policyChoice}
-            onChange={(e) => {
-              const next = e.target.value as SidePanelPolicyChoice;
-              setPolicyChoice(next);
-              if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-                void chrome.storage.local
-                  .set({ policyChoice: next })
-                  .catch(() => {});
-              }
-            }}
-          >
-            <option value="prefer_on_device">Prefer On-Device</option>
-            <option value="only_on_device">Strict Air-Gap (Nano Only)</option>
-            <option value="hybrid_escalation">Hybrid Escalation</option>
-          </select>
-        </label>
-
-        <label className="sp-checkbox">
-          <input
-            type="checkbox"
-            checked={enableSemanticPii}
-            onChange={(e) => setEnableSemanticPii(e.target.checked)}
-          />
-          <span>Stage 0.5 Semantic PII (On-Device PERSON/ORG scrub)</span>
-        </label>
-
-        <label className="sp-checkbox">
-          <input
-            type="checkbox"
-            checked={forceSandbox}
-            onChange={(e) => setForceSandbox(e.target.checked)}
-          />
-          <span>Sandbox Mode (Simulated local heuristic)</span>
-        </label>
-
-        <label>
-          <span className="sp-label">Custom Redaction Terms</span>
-          <input
-            type="text"
-            className="sp-select"
-            value={customTermsInput}
-            onChange={(e) => {
-              const next = e.target.value;
-              setCustomTermsInput(next);
-              if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-                void chrome.storage.local
-                  .set({ customTermsInput: next })
-                  .catch(() => {});
-              }
-            }}
-            placeholder="Comma-separated names, orgs, or IDs..."
-          />
-        </label>
 
         <textarea
           className="sp-textarea mono"
@@ -509,21 +539,28 @@ export function SidePanelApp() {
           <div className="sp-score-row">
             <div>
               <span className="sp-label">{activeAnalysis.documentType}</span>
-              <div className="sp-score-value mono">
+              <div className="sp-score-value">
                 {activeAnalysis.overallRiskScore}
-                <span className="sp-sub"> / 100 · {activeAnalysis.riskPosture}</span>
+                <span className="sp-score-denom">
+                  / 100 · {activeAnalysis.riskPosture}
+                </span>
               </div>
             </div>
-            <span className={`sp-pill mono ${routeBadge.className}`}>
-              {routeBadge.label}
-            </span>
+            <div className="sp-row">
+              <span className="sp-pill sp-pill-emerald mono">
+                Proof of Privacy ({activeRedaction.totalMasked})
+              </span>
+              <span className={`sp-pill mono ${routeBadge.className}`}>
+                {routeBadge.label}
+              </span>
+            </div>
           </div>
 
           <p className="sp-clause-body">{activeAnalysis.executiveSummary}</p>
 
           <div className="sp-row">
             <span className="sp-sub mono">
-              {activeAnalysis.clauses.length} flagged clause
+              {activeAnalysis.clauses.length} flagged issue
               {activeAnalysis.clauses.length === 1 ? '' : 's'}
             </span>
             <button
@@ -539,37 +576,88 @@ export function SidePanelApp() {
               {copiedKey === 'brief' ? 'Copied Brief' : 'Copy Brief'}
             </button>
           </div>
-
-          {activeAnalysis.clauses.map((clause) => (
-            <article key={clause.id} className="sp-clause">
-              <div className="sp-row">
-                <span className="sp-clause-title">{clause.title}</span>
-                <span
-                  className={`sp-pill mono ${severityPillClass(clause.severity)}`}
-                >
-                  {clause.severity.toUpperCase()}
-                </span>
-              </div>
-              <p className="sp-clause-body">{clause.rationale}</p>
-              <div className="sp-redline-box">
-                <strong>Redline:</strong> {clause.redlineProposal}
-              </div>
-              <div className="sp-row">
-                <span className="sp-sub mono">{clause.category}</span>
-                <button
-                  type="button"
-                  className="sp-btn-secondary"
-                  onClick={() =>
-                    void copyText(clause.id, clause.redlineProposal)
-                  }
-                >
-                  {copiedKey === clause.id ? 'Copied' : 'Copy Redline'}
-                </button>
-              </div>
-            </article>
-          ))}
         </section>
       )}
+
+      {report &&
+        activeAnalysis &&
+        activeAnalysis.clauses.map((clause) => {
+          const decision = decisions[clause.id];
+          const isExpanded = Boolean(expandedIds[clause.id]);
+          return (
+            <article
+              key={clause.id}
+              className={`sp-issue${decision ? ' is-decided' : ''}`}
+            >
+              <button
+                type="button"
+                className="sp-issue-trigger"
+                aria-expanded={isExpanded}
+                onClick={() => toggleExpanded(clause.id)}
+              >
+                <div className="sp-issue-head">
+                  <span
+                    className={`sp-pill mono ${severityPillClass(clause.severity)}`}
+                  >
+                    {clause.severity.toUpperCase()}
+                  </span>
+                  <span
+                    className={`sp-issue-title${decision ? ' is-struck' : ''}`}
+                  >
+                    {clause.title}
+                  </span>
+                </div>
+                <span className="sp-sub mono">{isExpanded ? '−' : '+'}</span>
+              </button>
+
+              <div className="sp-issue-actions">
+                {!decision ? (
+                  <>
+                    <button
+                      type="button"
+                      className="sp-btn-fix"
+                      onClick={() => {
+                        setClauseDecision(clause.id, 'applied');
+                        void copyText(clause.id, clause.redlineProposal);
+                      }}
+                    >
+                      ✓ Apply Fix
+                    </button>
+                    <button
+                      type="button"
+                      className="sp-btn-dismiss"
+                      onClick={() => setClauseDecision(clause.id, 'dismissed')}
+                    >
+                      ✕ Dismiss
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <span className="sp-sub mono">
+                      {decision === 'applied' ? 'Fix copied' : 'Dismissed'}
+                    </span>
+                    <button
+                      type="button"
+                      className="sp-btn-dismiss"
+                      onClick={() => setClauseDecision(clause.id)}
+                    >
+                      Undo
+                    </button>
+                  </>
+                )}
+              </div>
+
+              {isExpanded && (
+                <>
+                  <p className="sp-clause-body">{clause.rationale}</p>
+                  <div className="sp-redline-box">
+                    <strong>Redline:</strong> {clause.redlineProposal}
+                  </div>
+                </>
+              )}
+            </article>
+          );
+        })}
     </div>
   );
 }

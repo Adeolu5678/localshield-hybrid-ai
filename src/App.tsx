@@ -771,6 +771,25 @@ export function App() {
     });
   };
 
+  const handleAcceptAll = () => {
+    if (!activeAnalysis) return;
+    setExpandedClauseId(null);
+    setClauseDecisions((prev) => {
+      const updated = { ...prev };
+      for (const clause of activeAnalysis.clauses) {
+        const current = updated[clause.id];
+        if (!current || current.status === 'pending') {
+          updated[clause.id] = {
+            ...current,
+            status: 'accepted',
+          };
+        }
+      }
+      return updated;
+    });
+    setReviewStep('final');
+  };
+
   const handleApplyNegotiationSuggestion = (
     clauseId: string,
     suggestedRedline: string
@@ -1745,6 +1764,24 @@ export function App() {
                                 </button>
                               ))}
                             </div>
+                            {(() => {
+                              const pendingCount = activeAnalysis.clauses.filter(
+                                (c) =>
+                                  !clauseDecisions[c.id] ||
+                                  clauseDecisions[c.id].status === 'pending'
+                              ).length;
+                              return (
+                                pendingCount > 0 && (
+                                  <button
+                                    type="button"
+                                    className="ghost-btn compact"
+                                    onClick={handleAcceptAll}
+                                  >
+                                    Accept All ({pendingCount})
+                                  </button>
+                                )
+                              );
+                            })()}
                           </div>
                         )}
 
