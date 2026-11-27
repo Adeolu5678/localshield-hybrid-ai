@@ -777,6 +777,10 @@ function getShadowStyles(): string {
   pointer-events: none;
   white-space: normal;
 }
+.le-card-head[data-tooltip]:hover::after {
+  top: calc(100% + 6px);
+  bottom: auto;
+}
 .le-card-body p {
   margin: 8px 0 0;
 }

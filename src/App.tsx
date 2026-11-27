@@ -1730,7 +1730,16 @@ export function App() {
 
                       <div className="grammarly-issues-pane">
                         {activeAnalysis.clauses.length > 0 && (
-                          <div className="filter-row">
+                          <div
+                            className={`filter-row ${
+                              severityCounts.critical > 0 &&
+                              severityCounts.high > 0 &&
+                              severityCounts.medium > 0 &&
+                              severityCounts.low > 0
+                                ? "is-compact"
+                                : ""
+                            }`}
+                          >
                             <div className="filter-pills">
                               <button
                                 type="button"
@@ -1748,7 +1757,9 @@ export function App() {
                                   ["medium", "Medium"],
                                   ["low", "Low"]
                                 ] as const
-                              ).map(([sev, label]) => (
+                              )
+                                .filter(([sev]) => severityCounts[sev] > 0)
+                                .map(([sev, label]) => (
                                 <button
                                   key={sev}
                                   type="button"

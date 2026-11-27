@@ -812,7 +812,6 @@ header .status-pill,
   justify-content: flex-start;
   gap: 8px;
   flex-wrap: nowrap;
-  overflow-x: auto;
   margin-bottom: 14px;
 }
 
@@ -850,6 +849,11 @@ header .status-pill,
   font-weight: 500;
   white-space: nowrap;
   cursor: pointer;
+}
+
+.filter-row.is-compact .filter-pill {
+  font-size: 0.68rem;
+  padding: 3px 7px;
 }
 
 /* Branded LegalEase Hover Tooltips */
