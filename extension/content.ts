@@ -1,6 +1,7 @@
 import { analyzeDocumentHeuristically } from '../src/lib/analysisParser';
 import { initializeFirebaseServices, readFirebaseEnvConfig } from '../src/lib/firebaseClient';
 import { redactSensitiveData } from '../src/lib/piiRedactor';
+import { extractTransparentSignature } from '../src/lib/signatureProcessor';
 import type { ClauseSeverity, DocumentAnalysisResult, RiskClause } from '../src/types/analysis';
 
 declare const process: { env: Record<string, string | undefined> };
@@ -10,6 +11,11 @@ const HOST_ID = 'legalease-floating-root';
 const MARK_STYLE_ID = 'legalease-inline-mark-styles';
 const STORAGE_KEY = 'legalease_badge_pos';
 const SETTINGS_STORAGE_KEY = 'legalease_settings';
+const REPORT_HISTORY_STORAGE_KEY = 'legalease_report_history';
+const COMPANION_HISTORY_STORAGE_KEY = 'legalease_companion_history';
+const DEVICE_ID_STORAGE_KEY = 'legalease_device_id';
+const PRIVATE_PROFILE_STORAGE_KEY = 'legalease_private_profile';
+const MAX_HISTORY_ITEMS = 25;
 const EDGE_MARGIN = 12;
 const LEGAL_KEYWORDS = /\b(terms|privacy|agreement|contract|msa|dpa|legal)\b/i;
 const LEGAL_SIGNALS_GLOBAL = /\b(indemnify|liability|arbitration|confidential|warranty|termination|governing law|intellectual property|auto-renew|hereby|terms|privacy|agreement|contract)\b/gi;
@@ -50,6 +56,16 @@ interface UserSettings {
   policyMode: PolicyMode;
   enableSemanticPii: boolean;
   sandboxMode: boolean;
+  privateProfileEnabled: boolean;
+}
+
+interface PrivateProfile {
+  fullName: string;
+  company: string;
+  role: string;
+  email: string;
+  phone: string;
+  address: string;
 }
 
 interface BadgePosition {
@@ -57,9 +73,38 @@ interface BadgePosition {
   offset: number;
 }
 
+interface ReportHistoryItem {
+  id: string;
+  url: string;
+  pageTitle: string;
+  riskScore: number;
+  riskLabel: string;
+  flags: RiskClause[];
+  redactedCount: number;
+  scannedAt: string;
+}
+
+interface CompanionHistoryMessage {
+  role: 'user' | 'assistant';
+  text: string;
+}
+
+interface CompanionHistoryItem {
+  id: string;
+  url: string;
+  pageTitle: string;
+  selectedText: string;
+  messages: CompanionHistoryMessage[];
+  updatedAt: string;
+}
+
 interface ContentState {
   isOpen: boolean;
   settingsOpen: boolean;
+  historyOpen: boolean;
+  historyTab: 'reports' | 'companion';
+  reportHistory: ReportHistoryItem[];
+  companionHistory: CompanionHistoryItem[];
   isScanning: boolean;
   hasScanned: boolean;
   isEditableContext: boolean;
@@ -69,6 +114,9 @@ interface ContentState {
   error: string | null;
   badgePos: BadgePosition;
   settings: UserSettings;
+  deviceId: string;
+  privateProfile: PrivateProfile;
+  signatureDataUrl: string | null;
 }
 
 let wasDrawerOpen = false;
@@ -106,13 +154,15 @@ interface CompanionState {
   selectionStart: number;
   selectionEnd: number;
   savedRange: Range | null;
-  anchorRect: { left: number; top: number } | null;
+  anchorRect: { left: number; top: number; bottom?: number } | null;
   explanation: string;
   isExplaining: boolean;
   draftText: string;
   isRewriting: boolean;
   prompt: string;
   error: string | null;
+  historyId: string | null;
+  messages: CompanionHistoryMessage[];
 }
 
 const companionState: CompanionState = {
@@ -130,7 +180,9 @@ const companionState: CompanionState = {
   draftText: '',
   isRewriting: false,
   prompt: '',
-  error: null
+  error: null,
+  historyId: null,
+  messages: []
 };
 
 let companionDebounceTimer: number | null = null;
@@ -138,6 +190,10 @@ let companionDebounceTimer: number | null = null;
 const state: ContentState = {
   isOpen: false,
   settingsOpen: false,
+  historyOpen: false,
+  historyTab: 'reports',
+  reportHistory: [],
+  companionHistory: [],
   isScanning: false,
   hasScanned: false,
   isEditableContext: false,
@@ -156,9 +212,26 @@ const state: ContentState = {
     autoScan: true,
     policyMode: 'prefer_on_device',
     enableSemanticPii: false,
-    sandboxMode: false
-  }
+    sandboxMode: false,
+    privateProfileEnabled: false
+  },
+  deviceId: '',
+  privateProfile: {
+    fullName: '',
+    company: '',
+    role: '',
+    email: '',
+    phone: '',
+    address: ''
+  },
+  signatureDataUrl: null
 };
+
+void chrome.storage?.local?.get(['legalease_signature_png']).then((result) => {
+  if (typeof result?.legalease_signature_png === 'string' && result.legalease_signature_png) {
+    state.signatureDataUrl = result.legalease_signature_png;
+  }
+});
 
 let hasScannedCurrentContext = false;
 let lastContextUrl = window.location.href;
@@ -356,6 +429,71 @@ function highlightClauseInDom(
   return false;
 }
 
+function attachStrictScrollLock(el: HTMLElement | null): void {
+  if (!el) return;
+  el.addEventListener(
+    'wheel',
+    (e: WheelEvent) => {
+      const atTop = el.scrollTop <= 0 && e.deltaY < 0;
+      const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 1 && e.deltaY > 0;
+      if (atTop || atBottom) {
+        e.preventDefault();
+      }
+      e.stopPropagation();
+    },
+    { passive: false }
+  );
+}
+
+function saveReportHistory(analysis: DocumentAnalysisResult, redactedCount: number): void {
+  const riskLabel =
+    analysis.overallRiskScore >= 70
+      ? 'High Risk'
+      : analysis.overallRiskScore >= 40
+        ? 'Moderate Risk'
+        : 'Low Risk';
+  const item: ReportHistoryItem = {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    url: window.location.href,
+    pageTitle: document.title || window.location.hostname || 'Untitled Page',
+    riskScore: analysis.overallRiskScore,
+    riskLabel,
+    flags: analysis.clauses,
+    redactedCount,
+    scannedAt: new Date().toISOString()
+  };
+  state.reportHistory = [item, ...state.reportHistory].slice(0, MAX_HISTORY_ITEMS);
+  try {
+    if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+      chrome.storage.local.set({ [REPORT_HISTORY_STORAGE_KEY]: state.reportHistory });
+    }
+  } catch {
+    // Ignore storage errors in restricted contexts
+  }
+}
+
+function saveCompanionHistory(): void {
+  if (!companionState.selectedText && companionState.messages.length === 0) return;
+  const id = companionState.historyId || `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  companionState.historyId = id;
+  const item: CompanionHistoryItem = {
+    id,
+    url: window.location.href,
+    pageTitle: document.title || window.location.hostname || 'Untitled Page',
+    selectedText: companionState.selectedText,
+    messages: [...companionState.messages],
+    updatedAt: new Date().toISOString()
+  };
+  state.companionHistory = [item, ...state.companionHistory.filter((entry) => entry.id !== id)].slice(0, MAX_HISTORY_ITEMS);
+  try {
+    if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+      chrome.storage.local.set({ [COMPANION_HISTORY_STORAGE_KEY]: state.companionHistory });
+    }
+  } catch {
+    // Ignore storage errors in restricted contexts
+  }
+}
+
 function runLocalScan(shadow: ShadowRoot, sourceText?: string): void {
   syncContextUrl();
   hasScannedCurrentContext = true;
@@ -402,6 +540,7 @@ function runLocalScan(shadow: ShadowRoot, sourceText?: string): void {
     state.analysis = analysis;
     state.hasScanned = true;
     state.expandedClauseId = analysis.clauses[0]?.id ?? null;
+    saveReportHistory(analysis, totalMasked);
 
     clearInlineHighlights();
     if (!state.isEditableContext) {
@@ -728,6 +867,88 @@ function getShadowStyles(): string {
   align-items: center;
   justify-content: center;
 }
+.le-btn-history {
+  background: #FAF9F6;
+  color: #374151;
+  border: 1px solid #E4E2DC;
+  border-radius: 9999px;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.le-btn-history:hover {
+  background: #E9F3EE;
+  color: #0B4F3A;
+  border-color: #B9D8CA;
+}
+.le-btn-history.active {
+  background: #0B4F3A;
+  color: #FFFFFF;
+  border-color: #0B4F3A;
+}
+.le-history-tabs {
+  display: flex;
+  gap: 6px;
+  padding: 8px 12px 0;
+  background: #FFFFFF;
+  border-bottom: 1px solid #E4E2DC;
+}
+.le-history-tab {
+  flex: 1;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 6px 8px 8px;
+  font-size: 0.85em;
+  font-weight: 600;
+  color: #6B7280;
+  cursor: pointer;
+}
+.le-history-tab.active {
+  color: #0B4F3A;
+  border-bottom-color: #0B4F3A;
+}
+.le-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.le-history-item {
+  width: 100%;
+  text-align: left;
+  background: #FFFFFF;
+  border: 1px solid #E4E2DC;
+  border-radius: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.le-history-item:hover {
+  border-color: #0B4F3A;
+  background: #FAFDFB;
+}
+.le-history-item-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 0.9em;
+  color: #111111;
+}
+.le-history-item-meta {
+  font-size: 0.78em;
+  color: #6B7280;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .le-score-bar {
   display: flex;
   align-items: center;
@@ -1050,6 +1271,14 @@ function getShadowStyles(): string {
 .le-companion-input {
   max-height: 68px;
 }
+.le-companion-body {
+  max-height: 220px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
 .le-draft-submit {
   width: 28px;
   height: 28px;
@@ -1166,6 +1395,104 @@ function saveSettings(next: UserSettings): void {
   } catch {
     // Ignore storage errors in restricted contexts
   }
+}
+
+function savePrivateProfile(next: PrivateProfile): void {
+  state.privateProfile = next;
+  try {
+    if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+      chrome.storage.local.set({ [PRIVATE_PROFILE_STORAGE_KEY]: state.privateProfile });
+    }
+  } catch {
+    // Ignore storage errors in restricted contexts
+  }
+}
+
+const CONTRACT_PLACEHOLDER_RE = /\[(COMPANY_NAME|PARTY_A|PARTY_B|COUNTERPARTY_NAME|FULL_NAME|NAME|EMAIL|EMAIL_1|PHONE|PHONE_1|ADDRESS|ADDRESS_1|TITLE|ROLE|DATE)\]/g;
+
+function hasContractPlaceholders(text: string): boolean {
+  CONTRACT_PLACEHOLDER_RE.lastIndex = 0;
+  return CONTRACT_PLACEHOLDER_RE.test(text);
+}
+
+function fillPlaceholdersLocally(text: string, profile: PrivateProfile): string {
+  const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+  const map: Record<string, string> = {
+    COMPANY_NAME: profile.company,
+    PARTY_A: profile.company || profile.fullName,
+    PARTY_B: profile.company || profile.fullName,
+    COUNTERPARTY_NAME: profile.company || profile.fullName,
+    FULL_NAME: profile.fullName,
+    NAME: profile.fullName,
+    EMAIL: profile.email,
+    EMAIL_1: profile.email,
+    PHONE: profile.phone,
+    PHONE_1: profile.phone,
+    ADDRESS: profile.address,
+    ADDRESS_1: profile.address,
+    TITLE: profile.role,
+    ROLE: profile.role,
+    DATE: today
+  };
+
+  return text.replace(CONTRACT_PLACEHOLDER_RE, (full, key: string) => {
+    const val = map[key]?.trim();
+    return val ? val : full;
+  });
+}
+
+function getFillablePageFields(): Array<HTMLInputElement | HTMLTextAreaElement> {
+  const excludedTypes = new Set(['hidden', 'submit', 'button', 'reset', 'file', 'checkbox', 'radio', 'password']);
+  const results: Array<HTMLInputElement | HTMLTextAreaElement> = [];
+  document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('input, textarea').forEach((el) => {
+    if (el.disabled || el.readOnly) return;
+    if (el instanceof HTMLInputElement && excludedTypes.has((el.type || 'text').toLowerCase())) return;
+    const rect = el.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return;
+    results.push(el);
+  });
+  return results;
+}
+
+function hasFillablePageForms(): boolean {
+  return getFillablePageFields().length > 0;
+}
+
+function autoFillPageForms(profile: PrivateProfile): number {
+  let filled = 0;
+  for (const el of getFillablePageFields()) {
+    const hint = [
+      el.name || '',
+      el.id || '',
+      el.placeholder || '',
+      el.getAttribute('aria-label') || ''
+    ]
+      .join(' ')
+      .toLowerCase();
+
+    let value = '';
+    if (/\b(e-?mail)\b/.test(hint)) {
+      value = profile.email;
+    } else if (/\b(phone|tel|mobile)\b/.test(hint)) {
+      value = profile.phone;
+    } else if (/\b(company|organization|org|entity)\b/.test(hint)) {
+      value = profile.company;
+    } else if (/\b(role|title|position)\b/.test(hint)) {
+      value = profile.role;
+    } else if (/\b(address|street|location)\b/.test(hint)) {
+      value = profile.address;
+    } else if (/\b(full[_\s-]?name|name)\b/.test(hint)) {
+      value = profile.fullName;
+    }
+
+    if (value.trim()) {
+      el.value = value.trim();
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      filled += 1;
+    }
+  }
+  return filled;
 }
 
 function saveBadgePos(pos: BadgePosition): void {
@@ -1432,6 +1759,28 @@ function render(shadow: ShadowRoot): void {
         <span>Sandbox Mode</span>
         <input id="le-sandbox-mode" type="checkbox" ${state.settings.sandboxMode ? 'checked' : ''} />
       </label>
+      <label class="le-toggle-row" data-tooltip="Store your details strictly on-device to fill contract placeholders and web forms locally">
+        <span>Private Profile &amp; Auto-Fill</span>
+        <input id="le-private-profile-enabled" type="checkbox" ${state.settings.privateProfileEnabled ? 'checked' : ''} />
+      </label>
+      ${
+        state.settings.privateProfileEnabled
+          ? `<div class="le-profile-form" style="display:flex;flex-direction:column;gap:8px;margin-top:6px;padding:10px;border:1px solid #d1e7dd;border-radius:8px;background:#f8fbf9;">
+              <div style="font-size:11px;font-weight:600;color:#0B4F3A;">On-Device Private Profile (Never Sent to Cloud)</div>
+              <input class="le-input" id="le-profile-full-name" type="text" placeholder="Full Name" value="${escapeHtml(state.privateProfile.fullName)}" />
+              <input class="le-input" id="le-profile-company" type="text" placeholder="Company / Entity" value="${escapeHtml(state.privateProfile.company)}" />
+              <input class="le-input" id="le-profile-role" type="text" placeholder="Role / Title" value="${escapeHtml(state.privateProfile.role)}" />
+              <input class="le-input" id="le-profile-email" type="email" placeholder="Email" value="${escapeHtml(state.privateProfile.email)}" />
+              <input class="le-input" id="le-profile-phone" type="tel" placeholder="Phone" value="${escapeHtml(state.privateProfile.phone)}" />
+              <input class="le-input" id="le-profile-address" type="text" placeholder="Address" value="${escapeHtml(state.privateProfile.address)}" />
+              <div style="display:flex;align-items:center;gap:6px;margin-top:4px;">
+                <input id="le-signature-file" type="file" accept="image/*" style="display:none;" />
+                <button class="le-btn-scan" id="le-btn-upload-sig" type="button" style="flex:1;">Upload Signature (Auto-Strip Background)</button>
+                ${state.signatureDataUrl ? '<button class="le-btn-scan" id="le-btn-clear-sig" type="button">Clear</button>' : ''}
+              </div>
+            </div>`
+          : ''
+      }
     </div>
   `;
 
@@ -1447,7 +1796,16 @@ function render(shadow: ShadowRoot): void {
           </div>
         </div>
         <div class="le-actions">
+          ${state.settings.privateProfileEnabled && hasFillablePageForms() ? '<button class="le-btn-scan le-btn-fill-form" type="button" title="Auto-fill visible form fields locally">Fill Form</button>' : ''}
+          ${state.signatureDataUrl ? '<button class="le-btn-scan le-btn-copy-sig" type="button" title="Copy transparent PNG signature to clipboard">Copy Signature</button>' : ''}
           <button class="le-btn-scan" type="button">${state.isScanning ? 'Scanning...' : 'Scan Page'}</button>
+          <button class="le-btn-history${state.historyOpen ? ' active' : ''}" type="button" aria-label="History" title="History">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M3 12a9 9 0 1 0 3-6.7L3 8" />
+              <path d="M3 3v5h5" />
+              <path d="M12 7v5l3 2" />
+            </svg>
+          </button>
           <button class="le-btn-settings" type="button" aria-label="Settings" title="Settings">⚙</button>
           <button class="le-btn-close" type="button" aria-label="Close">×</button>
         </div>
@@ -1455,7 +1813,48 @@ function render(shadow: ShadowRoot): void {
       ${
         state.settingsOpen
           ? `<div class="le-body">${settingsHtml}</div>`
-          : `
+          : state.historyOpen
+            ? `
+      <div class="le-history-tabs">
+        <button class="le-history-tab${state.historyTab === 'reports' ? ' active' : ''}" type="button" data-history-tab="reports">Reports (${state.reportHistory.length})</button>
+        <button class="le-history-tab${state.historyTab === 'companion' ? ' active' : ''}" type="button" data-history-tab="companion">Companion (${state.companionHistory.length})</button>
+      </div>
+      <div class="le-body">
+        <div class="le-history-list">
+          ${
+            state.historyTab === 'reports'
+              ? state.reportHistory.length === 0
+                ? '<div class="le-empty">No saved page reports yet.</div>'
+                : state.reportHistory
+                    .map(
+                      (item) => `
+                  <button class="le-history-item" type="button" data-report-id="${escapeHtml(item.id)}">
+                    <div class="le-history-item-top">
+                      <span>${escapeHtml(item.pageTitle)}</span>
+                      <span class="le-pill">${item.riskScore}/100</span>
+                    </div>
+                    <div class="le-history-item-meta">${item.flags.length} flags · ${escapeHtml(item.url)}</div>
+                  </button>`
+                    )
+                    .join('')
+              : state.companionHistory.length === 0
+                ? '<div class="le-empty">No saved Companion threads yet.</div>'
+                : state.companionHistory
+                    .map(
+                      (item) => `
+                  <button class="le-history-item" type="button" data-companion-id="${escapeHtml(item.id)}">
+                    <div class="le-history-item-top">
+                      <span>${escapeHtml(item.pageTitle)}</span>
+                      <span class="le-pill">${item.messages.length} msgs</span>
+                    </div>
+                    <div class="le-history-item-meta">${escapeHtml(item.selectedText.slice(0, 90))}</div>
+                  </button>`
+                    )
+                    .join('')
+          }
+        </div>
+      </div>`
+            : `
       <div class="le-score-bar">
         <div>
           <div class="le-score-label">Risk Score</div>
@@ -1481,13 +1880,84 @@ function render(shadow: ShadowRoot): void {
   shadow.querySelector('.le-btn-close')?.addEventListener('click', () => {
     state.isOpen = false;
     state.settingsOpen = false;
+    state.historyOpen = false;
+    render(shadow);
+  });
+
+  shadow.querySelector('.le-btn-history')?.addEventListener('click', () => {
+    state.historyOpen = !state.historyOpen;
+    if (state.historyOpen) {
+      state.settingsOpen = false;
+    }
     render(shadow);
   });
 
   shadow.querySelector('.le-btn-settings')?.addEventListener('click', () => {
     state.settingsOpen = !state.settingsOpen;
+    if (state.settingsOpen) {
+      state.historyOpen = false;
+    }
     render(shadow);
   });
+
+  shadow.querySelectorAll<HTMLButtonElement>('[data-history-tab]').forEach((tabBtn) => {
+    tabBtn.addEventListener('click', () => {
+      const tab = tabBtn.getAttribute('data-history-tab');
+      if (tab === 'reports' || tab === 'companion') {
+        state.historyTab = tab;
+        render(shadow);
+      }
+    });
+  });
+
+  shadow.querySelectorAll<HTMLButtonElement>('[data-report-id]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const id = btn.getAttribute('data-report-id');
+      const found = state.reportHistory.find((entry) => entry.id === id);
+      if (!found) return;
+      state.analysis = {
+        documentType: 'Saved Report',
+        overallRiskScore: found.riskScore,
+        riskPosture: (found.riskLabel as DocumentAnalysisResult['riskPosture']) || 'Moderate',
+        executiveSummary: `Loaded saved report for ${found.pageTitle} (${found.url})`,
+        clauses: found.flags,
+        crossClauseFindings: [],
+        complianceFlags: []
+      };
+      state.redactedCount = found.redactedCount;
+      state.hasScanned = true;
+      state.expandedClauseId = found.flags[0]?.id ?? null;
+      state.historyOpen = false;
+      render(shadow);
+    });
+  });
+
+  shadow.querySelectorAll<HTMLButtonElement>('[data-companion-id]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const id = btn.getAttribute('data-companion-id');
+      const found = state.companionHistory.find((entry) => entry.id === id);
+      if (!found) return;
+      const lastAssistant = [...found.messages].reverse().find((m) => m.role === 'assistant');
+      companionState.isActive = true;
+      companionState.isOpen = true;
+      companionState.isEditable = false;
+      companionState.selectedText = found.selectedText;
+      companionState.explanation = lastAssistant?.text || '';
+      companionState.messages = [...found.messages];
+      companionState.historyId = found.id;
+      companionState.error = null;
+      companionState.anchorRect = companionState.anchorRect || {
+        left: Math.max(16, window.innerWidth - 420),
+        top: Math.max(80, window.innerHeight - 260),
+        bottom: Math.max(120, window.innerHeight - 220)
+      };
+      state.historyOpen = false;
+      render(shadow);
+      renderDraftLayer(shadow);
+    });
+  });
+
+  attachStrictScrollLock(shadow.querySelector<HTMLElement>('.le-body'));
 
   shadow.querySelector('.le-btn-back')?.addEventListener('click', () => {
     state.settingsOpen = false;
@@ -1550,6 +2020,73 @@ function render(shadow: ShadowRoot): void {
   shadow.querySelector<HTMLInputElement>('#le-sandbox-mode')?.addEventListener('change', (e) => {
     const checked = (e.target as HTMLInputElement).checked;
     saveSettings({ ...state.settings, sandboxMode: checked });
+  });
+
+  shadow.querySelector<HTMLInputElement>('#le-private-profile-enabled')?.addEventListener('change', (e) => {
+    const checked = (e.target as HTMLInputElement).checked;
+    saveSettings({ ...state.settings, privateProfileEnabled: checked });
+    render(shadow);
+  });
+
+  const bindProfileInput = (id: string, field: keyof PrivateProfile) => {
+    shadow.querySelector<HTMLInputElement>(id)?.addEventListener('input', (e) => {
+      const val = (e.target as HTMLInputElement).value;
+      savePrivateProfile({ ...state.privateProfile, [field]: val });
+    });
+  };
+  bindProfileInput('#le-profile-full-name', 'fullName');
+  bindProfileInput('#le-profile-company', 'company');
+  bindProfileInput('#le-profile-role', 'role');
+  bindProfileInput('#le-profile-email', 'email');
+  bindProfileInput('#le-profile-phone', 'phone');
+  bindProfileInput('#le-profile-address', 'address');
+
+  shadow.querySelector('.le-btn-fill-form')?.addEventListener('click', () => {
+    autoFillPageForms(state.privateProfile);
+  });
+
+  shadow.querySelector('#le-btn-upload-sig')?.addEventListener('click', () => {
+    shadow.querySelector<HTMLInputElement>('#le-signature-file')?.click();
+  });
+
+  shadow.querySelector<HTMLInputElement>('#le-signature-file')?.addEventListener('change', async (e) => {
+    const input = e.target as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = '';
+    if (!file) return;
+    try {
+      const pngDataUrl = await extractTransparentSignature(file);
+      state.signatureDataUrl = pngDataUrl;
+      chrome.storage?.local?.set({ legalease_signature_png: pngDataUrl });
+      render(shadow);
+    } catch {
+      // Ignore invalid image files
+    }
+  });
+
+  shadow.querySelector('#le-btn-clear-sig')?.addEventListener('click', () => {
+    state.signatureDataUrl = null;
+    void chrome.storage?.local?.set({ legalease_signature_png: '' });
+    render(shadow);
+  });
+
+  shadow.querySelector('.le-btn-copy-sig')?.addEventListener('click', async () => {
+    if (!state.signatureDataUrl) return;
+    try {
+      const res = await fetch(state.signatureDataUrl);
+      const blob = await res.blob();
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+      const btn = shadow.querySelector<HTMLButtonElement>('.le-btn-copy-sig');
+      if (btn) {
+        const prev = btn.textContent;
+        btn.textContent = 'Copied!';
+        window.setTimeout(() => {
+          btn.textContent = prev || 'Copy Signature';
+        }, 1500);
+      }
+    } catch {
+      // Ignore clipboard permission errors
+    }
   });
 
   shadow.querySelector<HTMLInputElement>('#le-auto-scan')?.addEventListener('change', (e) => {
@@ -1976,7 +2513,8 @@ function updateDraftPositions(shadow: ShadowRoot): void {
 
   if (companionState.isActive && companionState.anchorRect) {
     shell.style.display = 'block';
-    const { left: anchorLeft, top: anchorTop } = companionState.anchorRect;
+    const { left: anchorLeft, top: anchorTop, bottom: anchorBottom } = companionState.anchorRect;
+    const rectBottom = anchorBottom ?? anchorTop + 32;
     if (isExpanded) {
       const barWidth = Math.min(400, window.innerWidth - 24);
       const barHeight = shell.scrollHeight || 160;
@@ -1984,9 +2522,16 @@ function updateDraftPositions(shadow: ShadowRoot): void {
       const rawLeft = onRightSide ? anchorLeft + 32 - barWidth : anchorLeft;
       shell.style.width = `${barWidth}px`;
       shell.style.left = `${clamp(rawLeft, 12, Math.max(12, window.innerWidth - barWidth - 12))}px`;
-      shell.style.top = `${clamp(anchorTop, 12, Math.max(12, window.innerHeight - barHeight - 12))}px`;
+      if (rectBottom > window.innerHeight * 0.55) {
+        shell.style.bottom = `${Math.max(12, window.innerHeight - anchorTop + 8)}px`;
+        shell.style.top = 'auto';
+      } else {
+        shell.style.bottom = 'auto';
+        shell.style.top = `${clamp(anchorTop, 12, Math.max(12, window.innerHeight - barHeight - 12))}px`;
+      }
     } else {
       shell.style.width = '32px';
+      shell.style.bottom = 'auto';
       shell.style.left = `${clamp(anchorLeft, 8, window.innerWidth - 40)}px`;
       shell.style.top = `${clamp(anchorTop, 8, window.innerHeight - 40)}px`;
     }
@@ -2045,6 +2590,7 @@ function renderDraftLayer(shadow: ShadowRoot): void {
         </div>
       `;
       updateDraftPositions(shadow);
+    attachStrictScrollLock(layer.querySelector<HTMLElement>('.le-companion-body'));
       layer.querySelector<HTMLButtonElement>('.le-companion-pill')?.addEventListener('click', () => {
         if (!companionState.isEditable && companionState.savedRange) {
           highlightCompanionRange(companionState.savedRange);
@@ -2066,6 +2612,8 @@ function renderDraftLayer(shadow: ShadowRoot): void {
           .then((res) => {
             companionExplanationCache.set(companionState.selectedText, res);
             companionState.explanation = res;
+            companionState.messages = [{ role: 'assistant', text: res }];
+            saveCompanionHistory();
           })
           .catch((err: unknown) => {
             companionState.error = err instanceof Error ? err.message : 'Unable to explain selection.';
@@ -2108,10 +2656,15 @@ function renderDraftLayer(shadow: ShadowRoot): void {
         </div>`
       : '';
 
+    const canFillCompanion =
+      state.settings.privateProfileEnabled &&
+      (companionState.isEditable || hasContractPlaceholders(companionState.draftText || companionState.selectedText));
+
     const replaceActionHtml =
-      companionState.isEditable && !companionState.isRewriting && companionState.draftText
+      !companionState.isRewriting && (companionState.draftText || canFillCompanion)
         ? `<div class="le-draft-actions">
-            <button class="le-draft-insert le-companion-replace" type="button">Replace Selection</button>
+            ${canFillCompanion ? '<button class="le-draft-recreate le-companion-fill-details" type="button">Fill My Details</button>' : ''}
+            ${companionState.isEditable && companionState.draftText ? '<button class="le-draft-insert le-companion-replace" type="button">Replace Selection</button>' : ''}
           </div>`
         : '';
 
@@ -2124,13 +2677,15 @@ function renderDraftLayer(shadow: ShadowRoot): void {
 
     layer.innerHTML = `
       <div class="le-draft-shell expanded">
-        <div class="le-draft-bar has-preview" role="dialog" aria-label="LegalEase Companion">
+        <div class="le-draft-bar le-companion-bar has-preview" role="dialog" aria-label="LegalEase Companion">
           <div style="display:flex;align-items:center;justify-content:space-between;font-weight:600;font-size:12px;color:#0B4F3A;">
             <span>LegalEase Companion</span>
             <button class="le-companion-close" type="button" aria-label="Close Companion" style="border:none;background:transparent;cursor:pointer;font-size:14px;color:#4B5563;">✕</button>
           </div>
-          ${explanationHtml}
-          ${rewritePreviewHtml}
+          <div class="le-companion-body">
+            ${explanationHtml}
+            ${rewritePreviewHtml}
+          </div>
           <div class="le-draft-row">
             <span class="le-draft-sparkle" aria-hidden="true">✦</span>
             <textarea rows="1" class="le-draft-input le-companion-input" placeholder="${placeholder}">${escapeHtml(companionState.prompt)}</textarea>
@@ -2143,6 +2698,7 @@ function renderDraftLayer(shadow: ShadowRoot): void {
       </div>
     `;
     updateDraftPositions(shadow);
+    attachStrictScrollLock(layer.querySelector<HTMLElement>('.le-companion-body'));
 
     const input = layer.querySelector<HTMLTextAreaElement>('.le-companion-input');
     const submitBtn = layer.querySelector<HTMLButtonElement>('.le-companion-submit');
@@ -2158,6 +2714,12 @@ function renderDraftLayer(shadow: ShadowRoot): void {
         try {
           const baseText = companionState.draftText || companionState.selectedText;
           companionState.draftText = await generateLegalDraft(query, baseText);
+          companionState.messages = [
+            ...companionState.messages,
+            { role: 'user', text: query },
+            { role: 'assistant', text: companionState.draftText }
+          ];
+          saveCompanionHistory();
           companionState.prompt = '';
         } catch (err: unknown) {
           companionState.error = err instanceof Error ? err.message : 'Unable to rewrite selection.';
@@ -2179,6 +2741,12 @@ function renderDraftLayer(shadow: ShadowRoot): void {
             }
           }
           companionState.explanation = await explainSelection(companionState.selectedText, query);
+          companionState.messages = [
+            ...companionState.messages,
+            { role: 'user', text: query },
+            { role: 'assistant', text: companionState.explanation }
+          ];
+          saveCompanionHistory();
           companionState.prompt = '';
         } catch (err: unknown) {
           companionState.error = err instanceof Error ? err.message : 'Unable to answer follow-up.';
@@ -2223,6 +2791,13 @@ function renderDraftLayer(shadow: ShadowRoot): void {
         void runCompanionPrompt(val);
       });
     });
+    layer.querySelector<HTMLButtonElement>('.le-companion-fill-details')?.addEventListener('click', () => {
+      const source = companionState.draftText || companionState.selectedText;
+      if (source) {
+        companionState.draftText = fillPlaceholdersLocally(source, state.privateProfile);
+        renderDraftLayer(shadow);
+      }
+    });
     layer.querySelector<HTMLButtonElement>('.le-companion-replace')?.addEventListener('click', () => {
       if (companionState.draftText) {
         replaceSelectionInTarget(companionState.draftText);
@@ -2246,6 +2821,7 @@ function renderDraftLayer(shadow: ShadowRoot): void {
   if (!draftState.pillVisible || !draftState.targetEl || !draftState.targetEl.isConnected) {
     layer.innerHTML = '';
     updateDraftPositions(shadow);
+    attachStrictScrollLock(layer.querySelector<HTMLElement>('.le-companion-body'));
     return;
   }
 
@@ -2273,6 +2849,7 @@ function renderDraftLayer(shadow: ShadowRoot): void {
   const actionsHtml =
     !draftState.isGenerating && draftState.draftText
       ? `<div class="le-draft-actions">
+          ${state.settings.privateProfileEnabled && hasContractPlaceholders(draftState.draftText) ? '<button class="le-draft-recreate le-draft-fill-details" type="button">Fill My Details</button>' : ''}
           <button class="le-draft-recreate" type="button">↻ Redraft</button>
           <button class="le-draft-insert" type="button">Insert</button>
         </div>`
@@ -2423,6 +3000,13 @@ function renderDraftLayer(shadow: ShadowRoot): void {
       const val = chip.getAttribute('data-chip') || '';
       void runDraft(val);
     });
+  });
+
+  layer.querySelector<HTMLButtonElement>('.le-draft-fill-details')?.addEventListener('click', () => {
+    if (draftState.draftText) {
+      draftState.draftText = fillPlaceholdersLocally(draftState.draftText, state.privateProfile);
+      renderDraftLayer(shadow);
+    }
   });
 
   layer.querySelector<HTMLButtonElement>('.le-draft-recreate')?.addEventListener('click', () => {
@@ -2608,10 +3192,46 @@ function init(): void {
 
   try {
     if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-      chrome.storage.local.get([STORAGE_KEY, SETTINGS_STORAGE_KEY]).then((result: Record<string, unknown>) => {
+      chrome.storage.local.get([
+        STORAGE_KEY,
+        SETTINGS_STORAGE_KEY,
+        REPORT_HISTORY_STORAGE_KEY,
+        COMPANION_HISTORY_STORAGE_KEY,
+        DEVICE_ID_STORAGE_KEY,
+        PRIVATE_PROFILE_STORAGE_KEY
+      ]).then((result: Record<string, unknown>) => {
+        const savedDeviceId = result?.[DEVICE_ID_STORAGE_KEY];
+        if (typeof savedDeviceId === 'string' && savedDeviceId.trim()) {
+          state.deviceId = savedDeviceId;
+        } else {
+          const generatedId = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+            ? crypto.randomUUID()
+            : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+          state.deviceId = generatedId;
+          chrome.storage.local.set({ [DEVICE_ID_STORAGE_KEY]: generatedId });
+        }
+        const savedProfile = result?.[PRIVATE_PROFILE_STORAGE_KEY] as Partial<PrivateProfile> | undefined;
+        if (savedProfile && typeof savedProfile === 'object') {
+          state.privateProfile = {
+            fullName: typeof savedProfile.fullName === 'string' ? savedProfile.fullName : '',
+            company: typeof savedProfile.company === 'string' ? savedProfile.company : '',
+            role: typeof savedProfile.role === 'string' ? savedProfile.role : '',
+            email: typeof savedProfile.email === 'string' ? savedProfile.email : '',
+            phone: typeof savedProfile.phone === 'string' ? savedProfile.phone : '',
+            address: typeof savedProfile.address === 'string' ? savedProfile.address : ''
+          };
+        }
         const saved = result?.[STORAGE_KEY] as BadgePosition | undefined;
         if (saved && (saved.edge === 'left' || saved.edge === 'right' || saved.edge === 'top' || saved.edge === 'bottom') && typeof saved.offset === 'number') {
           state.badgePos = getClampedBadgePos(saved);
+        }
+        const savedReports = result?.[REPORT_HISTORY_STORAGE_KEY];
+        if (Array.isArray(savedReports)) {
+          state.reportHistory = savedReports.slice(0, MAX_HISTORY_ITEMS) as ReportHistoryItem[];
+        }
+        const savedCompanions = result?.[COMPANION_HISTORY_STORAGE_KEY];
+        if (Array.isArray(savedCompanions)) {
+          state.companionHistory = savedCompanions.slice(0, MAX_HISTORY_ITEMS) as CompanionHistoryItem[];
         }
         const savedSettings = result?.[SETTINGS_STORAGE_KEY] as Partial<UserSettings> | undefined;
         if (savedSettings) {
@@ -2622,7 +3242,8 @@ function init(): void {
             autoScan: typeof savedSettings.autoScan === 'boolean' ? savedSettings.autoScan : true,
             policyMode: savedSettings.policyMode && savedSettings.policyMode in POLICY_MODES ? savedSettings.policyMode : 'prefer_on_device',
             enableSemanticPii: typeof savedSettings.enableSemanticPii === 'boolean' ? savedSettings.enableSemanticPii : false,
-            sandboxMode: typeof savedSettings.sandboxMode === 'boolean' ? savedSettings.sandboxMode : false
+            sandboxMode: typeof savedSettings.sandboxMode === 'boolean' ? savedSettings.sandboxMode : false,
+            privateProfileEnabled: typeof savedSettings.privateProfileEnabled === 'boolean' ? savedSettings.privateProfileEnabled : false
           };
         }
         render(shadow);

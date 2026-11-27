@@ -273,7 +273,28 @@ export function App() {
     null
   );
   const [restoreVaultForExport, setRestoreVaultForExport] = useState(false);
+  const [signatureDataUrl, setSignatureDataUrl] = useState<string | null>(() => {
+    try {
+      return window.localStorage.getItem('legalease_signature_png');
+    } catch {
+      return null;
+    }
+  });
+  const [includeSignature, setIncludeSignature] = useState(false);
   const [exportCopied, setExportCopied] = useState(false);
+
+  const handleSignatureChange = (next: string | null) => {
+    setSignatureDataUrl(next);
+    try {
+      if (next) {
+        window.localStorage.setItem('legalease_signature_png', next);
+      } else {
+        window.localStorage.removeItem('legalease_signature_png');
+      }
+    } catch {
+      // Ignore storage errors
+    }
+  };
 
   const [sampleMenuOpen, setSampleMenuOpen] = useState(false);
   const [policyMenuOpen, setPolicyMenuOpen] = useState(false);
@@ -882,7 +903,9 @@ export function App() {
       originalFilename: ingestedSource?.filename,
       originalBuffer: ingestedSource?.originalBuffer,
       compiledText,
-      replacements
+      replacements,
+      signatureDataUrl:
+        includeSignature && signatureDataUrl ? signatureDataUrl : undefined
     });
 
     const url = URL.createObjectURL(blob);
@@ -2003,6 +2026,10 @@ export function App() {
                       decisions={clauseDecisions}
                       restoreVaultForView={restoreVaultForExport}
                       onToggleRestoreVault={setRestoreVaultForExport}
+                      includeSignature={includeSignature}
+                      onToggleIncludeSignature={setIncludeSignature}
+                      signatureDataUrl={signatureDataUrl}
+                      onSignatureChange={handleSignatureChange}
                       onExport={() => {
                         void handleExportEditedDocument();
                       }}

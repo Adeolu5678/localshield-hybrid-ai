@@ -1,10 +1,11 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { restoreFromVault } from '../lib/piiRedactor';
 import {
   compileRedlinedDocument,
   computeWordDiff,
   type ClauseRedlineDecision
 } from '../lib/redlineDiff';
+import { extractTransparentSignature } from '../lib/signatureProcessor';
 import type { RedactionResult, RiskClause } from '../types/analysis';
 
 interface ContractDiffViewProps {
@@ -13,6 +14,10 @@ interface ContractDiffViewProps {
   decisions: Record<string, ClauseRedlineDecision>;
   restoreVaultForView: boolean;
   onToggleRestoreVault: (next: boolean) => void;
+  includeSignature: boolean;
+  onToggleIncludeSignature: (next: boolean) => void;
+  signatureDataUrl: string | null;
+  onSignatureChange: (next: string | null) => void;
   onExport?: () => void;
 }
 
@@ -22,9 +27,29 @@ export function ContractDiffView({
   decisions,
   restoreVaultForView,
   onToggleRestoreVault,
+  includeSignature,
+  onToggleIncludeSignature,
+  signatureDataUrl,
+  onSignatureChange,
   onExport
 }: ContractDiffViewProps) {
   const [displayMode, setDisplayMode] = useState<'diff' | 'clean'>('clean');
+  const sigInputRef = useRef<HTMLInputElement | null>(null);
+
+  const handleSignatureFile = async (
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    try {
+      const pngDataUrl = await extractTransparentSignature(file);
+      onSignatureChange(pngDataUrl);
+      onToggleIncludeSignature(true);
+    } catch {
+      // Ignore invalid image files
+    }
+  };
 
   const compiled = useMemo(
     () => compileRedlinedDocument(redaction.redactedText, clauses, decisions),
@@ -79,6 +104,59 @@ export function ContractDiffView({
             />
             <span>Include Private Details</span>
           </label>
+          <label
+            className="checkbox-field"
+            data-tooltip="Embed your transparent PNG signature at the bottom of exported PDFs"
+          >
+            <input
+              type="checkbox"
+              checked={includeSignature && Boolean(signatureDataUrl)}
+              disabled={!signatureDataUrl}
+              onChange={(e) => onToggleIncludeSignature(e.target.checked)}
+            />
+            <span>Include Signature</span>
+          </label>
+          <input
+            ref={sigInputRef}
+            type="file"
+            accept="image/*"
+            style={{ display: 'none' }}
+            onChange={(e) => {
+              void handleSignatureFile(e);
+            }}
+          />
+          {!signatureDataUrl ? (
+            <button
+              type="button"
+              className="secondary-btn"
+              style={{ padding: '4px 10px', fontSize: '12px' }}
+              onClick={() => sigInputRef.current?.click()}
+            >
+              Upload Signature
+            </button>
+          ) : (
+            <>
+              <button
+                type="button"
+                className="secondary-btn"
+                style={{ padding: '4px 10px', fontSize: '12px' }}
+                onClick={() => sigInputRef.current?.click()}
+              >
+                Replace
+              </button>
+              <button
+                type="button"
+                className="secondary-btn"
+                style={{ padding: '4px 10px', fontSize: '12px' }}
+                onClick={() => {
+                  onSignatureChange(null);
+                  onToggleIncludeSignature(false);
+                }}
+              >
+                Clear
+              </button>
+            </>
+          )}
           <label className="checkbox-field">
             <input
               type="checkbox"

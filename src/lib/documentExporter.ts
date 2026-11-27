@@ -11,6 +11,7 @@ export interface ExportEditedDocumentOptions {
   originalBuffer?: ArrayBuffer;
   compiledText: string;
   replacements: TextReplacement[];
+  signatureDataUrl?: string;
 }
 
 export interface ExportedDocumentResult {
@@ -245,7 +246,20 @@ function wrapLine(
   return lines;
 }
 
-async function exportPdf(compiledText: string): Promise<Blob> {
+function decodePngDataUrl(dataUrl: string): Uint8Array {
+  const base64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+async function exportPdf(
+  compiledText: string,
+  signatureDataUrl?: string
+): Promise<Blob> {
   const pdfDoc = await PDFDocument.create();
   const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
 
@@ -299,6 +313,40 @@ async function exportPdf(compiledText: string): Promise<Blob> {
     y -= lineHeight;
   }
 
+  if (signatureDataUrl) {
+    const pngBytes = decodePngDataUrl(signatureDataUrl);
+    const pngImage = await pdfDoc.embedPng(pngBytes);
+    const maxSigWidth = 160;
+    const maxSigHeight = 56;
+    const scale = Math.min(
+      maxSigWidth / pngImage.width,
+      maxSigHeight / pngImage.height,
+      1
+    );
+    const sigWidth = pngImage.width * scale;
+    const sigHeight = pngImage.height * scale;
+
+    if (y < margin + sigHeight + 36) {
+      page = pdfDoc.addPage([pageWidth, pageHeight]);
+    }
+
+    const labelY = margin;
+    const sigY = labelY + 14;
+    page.drawImage(pngImage, {
+      x: margin,
+      y: sigY,
+      width: sigWidth,
+      height: sigHeight
+    });
+    page.drawText('Signed:', {
+      x: margin,
+      y: labelY,
+      size: 9.5,
+      font,
+      color: rgb(0.25, 0.25, 0.25)
+    });
+  }
+
   const pdfBytes = await pdfDoc.save();
   return new Blob([new Uint8Array(pdfBytes)], { type: PDF_MIME });
 }
@@ -322,7 +370,7 @@ export async function exportEditedDocument(
   }
 
   if (ext === 'pdf') {
-    const blob = await exportPdf(options.compiledText);
+    const blob = await exportPdf(options.compiledText, options.signatureDataUrl);
     return {
       blob,
       filename,
