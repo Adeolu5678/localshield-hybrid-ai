@@ -1069,15 +1069,23 @@ export async function runHybridDocumentAnalysis(
 
   const triageStart = now();
 
+  const escalateLargeDocToCloud =
+    options.policyMode === 'prefer_on_device' &&
+    options.isOnline &&
+    redaction.redactedText.length > 12000;
+  const stage1PolicyMode: HybridPolicyMode = escalateLargeDocToCloud
+    ? 'only_in_cloud'
+    : options.policyMode;
+
   if (options.modelFactory && !options.useSimulatedSandbox) {
     const executeStage1 = async (
       schemaKey: ModelSchemaKey,
       activeChunked: ChunkedDocument
     ) => {
-      const model = options.modelFactory!(options.policyMode, schemaKey);
+      const model = options.modelFactory!(stage1PolicyMode, schemaKey);
       const compactForNano =
         options.chromeNanoAvailability === 'available' &&
-        options.policyMode !== 'only_in_cloud';
+        stage1PolicyMode !== 'only_in_cloud';
       const firstPrompt = buildTriagePrompt(activeChunked.chunks[0], {
         index: 0,
         total: activeChunked.chunkCount,
@@ -1089,8 +1097,8 @@ export async function runHybridDocumentAnalysis(
       );
 
       const shouldProbeTokens =
-        options.policyMode === 'only_on_device' ||
-        (activeChunked.chunkCount > 1 && options.policyMode !== 'only_in_cloud');
+        stage1PolicyMode === 'only_on_device' ||
+        (activeChunked.chunkCount > 1 && stage1PolicyMode !== 'only_in_cloud');
 
       const tokenProbe = shouldProbeTokens
         ? await probeTokenBudget(model, firstRequest, redaction.redactedText)
@@ -1170,8 +1178,8 @@ export async function runHybridDocumentAnalysis(
       const chunkSources = new Set<'on_device' | 'in_cloud'>();
       if (
         activeChunked.chunkCount > 1 &&
-        (options.policyMode === 'only_in_cloud' ||
-          options.policyMode === 'prefer_in_cloud')
+        (stage1PolicyMode === 'only_in_cloud' ||
+          stage1PolicyMode === 'prefer_in_cloud')
       ) {
         const concurrentResults = await Promise.all(
           activeChunked.chunks.map((_, i) => runChunk(i))
@@ -1204,8 +1212,9 @@ export async function runHybridDocumentAnalysis(
           }
         : extractTokenStats(combinedPromptText, combinedOutputText);
 
-      const fallbackReason =
-        options.policyMode === 'prefer_on_device' && resolvedSource === 'in_cloud'
+      const fallbackReason = escalateLargeDocToCloud
+        ? 'Document exceeds on-device Nano context budget (>12K chars); escalated to Cloud Gemini for full-context accuracy.'
+        : options.policyMode === 'prefer_on_device' && resolvedSource === 'in_cloud'
           ? `Chrome Gemini Nano status was "${options.chromeNanoAvailability}"; Firebase AI Logic automatically fell back to ${options.cloudModelName}.`
           : options.policyMode === 'prefer_in_cloud' && resolvedSource === 'on_device'
             ? `Cloud inference was unavailable or offline; Firebase AI Logic fell back to on-device execution.`
@@ -1329,7 +1338,13 @@ export async function runHybridDocumentAnalysis(
       }
     } else {
       // prefer_on_device
-      if (canRunOnDevice) {
+      if (escalateLargeDocToCloud) {
+        badge = 'SIMULATED CLOUD';
+        modelName = `Sandbox: ${options.cloudModelName}`;
+        simulatedStage1WasCloud = true;
+        fallbackReason =
+          'Document exceeds on-device Nano context budget (>12K chars); escalated to Cloud Gemini for full-context accuracy.';
+      } else if (canRunOnDevice) {
         badge = 'SIMULATED ON-DEVICE';
         modelName = 'Sandbox: Gemini Nano (On-Device)';
       } else if (options.isOnline) {

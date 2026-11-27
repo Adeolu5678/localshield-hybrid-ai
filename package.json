@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "build:extension": "tsc --noEmit && vite build --config vite.extension.config.ts && esbuild extension/content.ts --bundle --format=iife --outfile=dist-extension/content.js --minify",
+    "build:extension": "tsc --noEmit && vite build --config vite.extension.config.ts && node extension/build-content.mjs",
     "preview": "vite preview",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"

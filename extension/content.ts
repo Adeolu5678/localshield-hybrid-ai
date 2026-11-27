@@ -1,6 +1,10 @@
 import { analyzeDocumentHeuristically } from '../src/lib/analysisParser';
+import { initializeFirebaseServices, readFirebaseEnvConfig } from '../src/lib/firebaseClient';
 import { redactSensitiveData } from '../src/lib/piiRedactor';
 import type { ClauseSeverity, DocumentAnalysisResult, RiskClause } from '../src/types/analysis';
+
+declare const process: { env: Record<string, string | undefined> };
+const EXTENSION_API_KEY = process.env.VITE_FIREBASE_API_KEY || readFirebaseEnvConfig().config.firebaseOptions.apiKey;
 
 const HOST_ID = 'legalease-floating-root';
 const MARK_STYLE_ID = 'legalease-inline-mark-styles';
@@ -70,6 +74,66 @@ interface ContentState {
 let wasDrawerOpen = false;
 let activeEditableEl: HTMLElement | null = null;
 let editDebounceTimer: number | null = null;
+
+interface DraftState {
+  targetEl: HTMLElement | null;
+  pillVisible: boolean;
+  isBarOpen: boolean;
+  prompt: string;
+  draftText: string;
+  isGenerating: boolean;
+  error: string | null;
+  pillOffset: { dx: number; dy: number } | null;
+}
+
+const draftState: DraftState = {
+  targetEl: null,
+  pillVisible: false,
+  isBarOpen: false,
+  prompt: '',
+  draftText: '',
+  isGenerating: false,
+  error: null,
+  pillOffset: null
+};
+
+interface CompanionState {
+  isActive: boolean;
+  isOpen: boolean;
+  selectedText: string;
+  isEditable: boolean;
+  targetEl: HTMLElement | null;
+  selectionStart: number;
+  selectionEnd: number;
+  savedRange: Range | null;
+  anchorRect: { left: number; top: number } | null;
+  explanation: string;
+  isExplaining: boolean;
+  draftText: string;
+  isRewriting: boolean;
+  prompt: string;
+  error: string | null;
+}
+
+const companionState: CompanionState = {
+  isActive: false,
+  isOpen: false,
+  selectedText: '',
+  isEditable: false,
+  targetEl: null,
+  selectionStart: 0,
+  selectionEnd: 0,
+  savedRange: null,
+  anchorRect: null,
+  explanation: '',
+  isExplaining: false,
+  draftText: '',
+  isRewriting: false,
+  prompt: '',
+  error: null
+};
+
+let companionDebounceTimer: number | null = null;
 
 const state: ContentState = {
   isOpen: false,
@@ -793,6 +857,246 @@ function getShadowStyles(): string {
   font-size: 0.88em;
   color: #4B5563;
 }
+.le-draft-shell {
+  position: fixed;
+  z-index: 2147483647;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  overflow: hidden;
+  transition: width 220ms cubic-bezier(0.16, 1, 0.3, 1), height 220ms cubic-bezier(0.16, 1, 0.3, 1), border-radius 220ms cubic-bezier(0.16, 1, 0.3, 1), left 220ms cubic-bezier(0.16, 1, 0.3, 1), top 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.le-draft-shell.expanded {
+  width: 400px;
+  max-width: calc(100vw - 16px);
+  height: auto;
+  border-radius: 24px;
+}
+.le-draft-pill {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid #D1CEC6;
+  background: #FAF9F6;
+  color: #0B4F3A;
+  cursor: pointer;
+  touch-action: none;
+  box-shadow: 0 2px 8px rgba(17, 17, 17, 0.14);
+  transition: transform 120ms ease, background 120ms ease, border-color 120ms ease;
+}
+.le-draft-pill img {
+  width: 18px;
+  height: 18px;
+  pointer-events: none;
+  user-select: none;
+}
+.le-draft-pill:hover {
+  background: #F4F3EF;
+  border-color: #0B4F3A;
+  transform: translateY(-1px);
+}
+.le-draft-bar {
+  position: relative;
+  width: 100%;
+  background: #F4F3EF;
+  color: #111111;
+  border: 1px solid #E4E2DC;
+  border-radius: 24px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 12.5px;
+}
+.le-draft-bar.multiline,
+.le-draft-bar.has-preview {
+  border-radius: 18px;
+}
+.le-draft-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  font-weight: 600;
+  color: #374151;
+}
+.le-draft-preview {
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 10px 12px;
+  background: #FAF9F6;
+  border: 1px solid #E4E2DC;
+  border-radius: 10px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: #1F2937;
+  white-space: pre-wrap;
+}
+@keyframes leShimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+.le-draft-shimmer-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.le-draft-shimmer {
+  height: 12px;
+  border-radius: 6px;
+  background: linear-gradient(90deg, #ECEAE4 25%, #F7F6F2 50%, #ECEAE4 75%);
+  background-size: 200% 100%;
+  animation: leShimmer 1.4s infinite linear;
+}
+.le-draft-shimmer.short {
+  width: 68%;
+}
+.le-draft-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.le-draft-recreate {
+  background: #F4F3EF;
+  color: #374151;
+  border: 1px solid #E4E2DC;
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.le-draft-recreate:hover {
+  background: #E9E7E0;
+}
+.le-draft-insert {
+  background: #0B4F3A;
+  color: #FFFFFF;
+  border: none;
+  border-radius: 999px;
+  padding: 6px 16px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.le-draft-insert:hover {
+  background: #093F2E;
+}
+.le-draft-close {
+  background: transparent;
+  color: #6B7280;
+  border: none;
+  border-radius: 999px;
+  width: 24px;
+  height: 24px;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.le-draft-close:hover {
+  background: #F3F4F6;
+  color: #111111;
+}
+.le-draft-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  min-height: 28px;
+}
+.le-draft-sparkle {
+  width: 20px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #0B4F3A;
+  font-size: 15px;
+  line-height: 1;
+  flex-shrink: 0;
+  user-select: none;
+}
+.le-draft-input {
+  flex: 1;
+  min-width: 0;
+  min-height: 28px;
+  max-height: 140px;
+  padding: 5px 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: #111111;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+  resize: none;
+  overflow-y: auto;
+  outline: none;
+  box-sizing: border-box;
+}
+.le-draft-input::placeholder {
+  color: #6B7280;
+}
+.le-draft-submit {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: #0B4F3A;
+  color: #FFFFFF;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  flex-shrink: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+}
+.le-draft-submit.visible {
+  display: inline-flex;
+}
+.le-draft-submit:hover {
+  background: #093F2E;
+}
+.le-draft-submit:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.le-draft-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.le-draft-chip {
+  background: #FAF9F6;
+  color: #374151;
+  border: 1px solid #D1CEC6;
+  border-radius: 999px;
+  padding: 3px 9px;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.le-draft-chip:hover {
+  border-color: #0B4F3A;
+  color: #0B4F3A;
+}
+.le-draft-error {
+  font-size: 11.5px;
+  color: #B91C1C;
+}
 `;
 }
 
@@ -879,9 +1183,10 @@ function render(shadow: ShadowRoot): void {
 
   if (!state.isOpen) {
     wasDrawerOpen = false;
+    const showFab = (flagCount > 0 || isLegalPage()) && !draftState.pillVisible && !draftState.isBarOpen;
     shadow.innerHTML = `
       <style>${getShadowStyles()}</style>
-      <button class="le-fab${state.isScanning ? ' is-scanning' : ''}" type="button" title="Open LegalEase Audit" style="${getFabStyle(state.badgePos)}">
+      ${showFab ? `<button class="le-fab${state.isScanning ? ' is-scanning' : ''}" type="button" title="Open LegalEase Audit" style="${getFabStyle(state.badgePos)}">
         <img src="${escapeHtml(logoUrl)}" alt="LegalEase" draggable="false" />
         ${
           state.isScanning
@@ -890,7 +1195,8 @@ function render(shadow: ShadowRoot): void {
               ? `<span class="le-badge ${riskScore >= 60 ? 'is-high' : ''}">${flagCount}</span>`
               : ''
         }
-      </button>
+      </button>` : ''}
+      <div id="le-draft-layer"></div>
     `;
     const fab = shadow.querySelector<HTMLButtonElement>('.le-fab');
     if (fab) {
@@ -983,6 +1289,7 @@ function render(shadow: ShadowRoot): void {
         }
       });
     }
+    renderDraftLayer(shadow);
     return;
   }
 
@@ -1315,6 +1622,746 @@ function render(shadow: ShadowRoot): void {
       render(shadow);
     });
   });
+
+  if (!shadow.getElementById('le-draft-layer')) {
+    const draftLayer = document.createElement('div');
+    draftLayer.id = 'le-draft-layer';
+    shadow.appendChild(draftLayer);
+  }
+  renderDraftLayer(shadow);
+}
+
+const DRAFT_TEMPLATES: Record<string, string> = {
+  'Balanced NDA':
+    'Mutual Confidentiality. Each party ("Receiving Party") agrees to hold the other party\'s Confidential Information in strict confidence using at least the same degree of care it uses for its own confidential information, and not less than reasonable care. This obligation survives for three (3) years from disclosure and excludes information that is publicly available, independently developed, or rightfully received from a third party without restriction.',
+  'Fair Liability Cap':
+    'Limitation of Liability. Except for breaches of confidentiality, indemnification obligations, or gross negligence/willful misconduct, each party\'s aggregate liability arising out of or related to this Agreement shall not exceed the total fees paid or payable by Customer in the twelve (12) months immediately preceding the event giving rise to liability. Neither party shall be liable for indirect, incidental, or consequential damages.',
+  'Payment Terms':
+    'Fees and Payment. Undisputed invoices are due net thirty (30) days from receipt. Customer may withhold payment of any amount disputed in good faith by providing written notice within fifteen (15) days of invoice receipt, and the parties will work promptly to resolve the dispute. Late undisputed balances may accrue interest at 1.0% per month or the maximum rate permitted by law, whichever is lower.'
+};
+
+function getLocalTemplateDraft(prompt: string, previousDraft?: string): string {
+  const normalized = prompt.trim().toLowerCase();
+  const pctMatch = prompt.match(/\b(\d+(?:\.\d+)?%)/);
+  const monthMatch = prompt.match(/\b(\d+)\s*months?\b/i);
+
+  if (previousDraft) {
+    let updated = previousDraft;
+    let changed = false;
+
+    if (normalized.includes('mutual')) {
+      updated = updated
+        .replace(/\b(Receiving Party|Provider|Vendor)\b/gi, 'either party')
+        .replace(/Confidentiality\./i, 'Mutual Confidentiality.');
+      changed = true;
+    }
+    if (monthMatch) {
+      const months = monthMatch[1];
+      const replaced = updated.replace(/\b\d+\s*\(\d+\)\s*months?\b|\b\d+\s*months?\b/gi, `${months} months`);
+      if (replaced !== updated) {
+        updated = replaced;
+        changed = true;
+      }
+    }
+    if (pctMatch) {
+      const replaced = updated.replace(/\b\d+(?:\.\d+)?%/, pctMatch[1]);
+      if (replaced !== updated) {
+        updated = replaced;
+        changed = true;
+      }
+    }
+    if ((normalized.includes('ip') || normalized.includes('intellectual property')) && !/intellectual property/i.test(updated)) {
+      updated = `${updated}\n\nIntellectual Property Assignment. Each party hereby assigns to the Company all right, title, and interest in and to any Intellectual Property created in connection with this Agreement.`;
+      changed = true;
+    }
+    if ((normalized.includes('non-solicit') || normalized.includes('nonsolicit')) && !/non-solicitation/i.test(updated)) {
+      updated = `${updated}\n\nNon-Solicitation. For a period of twelve (12) months following termination, neither party shall directly solicit for employment any employee or contractor of the other party.`;
+      changed = true;
+    }
+    if (!changed && !updated.toLowerCase().includes('good faith')) {
+      updated = `${updated}\n\nGeneral. Both parties shall perform their respective obligations in good faith and provide written notice of any material breach with a thirty (30) day cure period.`;
+    }
+    return updated;
+  }
+
+  if (/\b(co-?founder|equity|vesting|shares|startup)\b/i.test(normalized)) {
+    const equityPct = pctMatch ? pctMatch[1] : 'the agreed percentage';
+    return `Co-Founder Equity & Vesting Agreement. Founder shall receive ${equityPct} of the Company's common stock, subject to a four (4) year vesting schedule with a one (1) year cliff: twenty-five percent (25%) of the shares shall vest on the one-year anniversary of the Vesting Commencement Date, and the remaining seventy-five percent (75%) shall vest in equal monthly installments over the following thirty-six (36) months, conditioned upon continuous service. Founder may file a timely election under Section 83(b) of the Internal Revenue Code within thirty (30) days of the grant date. Founder hereby assigns to the Company all right, title, and interest in and to all Intellectual Property conceived or developed in connection with the Company, and agrees to maintain strict confidentiality of all proprietary Company information.`;
+  }
+
+  if (/\b(freelance|contractor|services|sow|statement of work)\b/i.test(normalized)) {
+    return 'Independent Contractor & Services. Contractor shall perform the Services in a professional and workmanlike manner in accordance with the applicable Statement of Work. Contractor is an independent contractor and not an employee of Client. Upon full payment of undisputed fees, all deliverables created specifically for Client under this Agreement shall be owned by Client as work made for hire, or otherwise assigned to Client.';
+  }
+
+  if (/\b(privacy|data|gdpr|ai|model|training)\b/i.test(normalized)) {
+    return 'Data Privacy & AI Processing. Each party shall comply with all applicable data protection laws. Provider shall process Customer Data solely to deliver and support the Services and shall not use Customer Data to train or fine-tune foundation models for third parties without Customer\'s prior written consent. Provider shall maintain industry-standard technical and organizational safeguards.';
+  }
+
+  for (const [label, template] of Object.entries(DRAFT_TEMPLATES)) {
+    if (
+      normalized.includes(label.toLowerCase()) ||
+      (label === 'Balanced NDA' && normalized.includes('nda')) ||
+      (label === 'Fair Liability Cap' && normalized.includes('liability')) ||
+      (label === 'Payment Terms' && normalized.includes('payment'))
+    ) {
+      return template;
+    }
+  }
+
+  return 'Standard Commercial Terms. Each party shall perform its obligations in good faith, comply with all applicable laws and regulations, and provide written notice of any material breach with a thirty (30) day cure period prior to termination.';
+}
+
+async function generateLegalDraft(prompt: string, previousDraft?: string): Promise<string> {
+  const mode = state.settings.policyMode;
+  const systemInstruction = 'You are LegalEase, a concise commercial contract drafting assistant. Return only the ready-to-insert legal clause text with no preamble or markdown fences.';
+  const fullPrompt = previousDraft
+    ? `Refine the following contract clause based on this instruction: "${prompt}".\n\nCurrent draft:\n${previousDraft}`
+    : `Draft a clear, balanced contract clause for: "${prompt}".`;
+
+  const tryOnDevice = async (): Promise<string | null> => {
+    try {
+      const lm = (window as unknown as { LanguageModel?: { create?: (opts?: unknown) => Promise<{ prompt: (q: string) => Promise<string>; destroy?: () => void }> } }).LanguageModel;
+      if (!lm?.create) return null;
+      const session = await lm.create({ systemPrompt: systemInstruction });
+      try {
+        const result = await session.prompt(fullPrompt);
+        return result?.trim() || null;
+      } finally {
+        session.destroy?.();
+      }
+    } catch {
+      return null;
+    }
+  };
+
+  let cloudError: string | null = null;
+
+  const tryCloud = async (): Promise<string | null> => {
+    try {
+      const services = await initializeFirebaseServices({ skipAppCheck: true });
+      const model = (services as unknown as { geminiModel?: { generateContent?: (p: string) => Promise<{ response?: { text?: () => string } }> } })?.geminiModel;
+      if (model?.generateContent) {
+        const res = await model.generateContent(`${systemInstruction}\n\n${fullPrompt}`);
+        const text = res?.response?.text?.();
+        if (text?.trim()) return text.trim();
+      }
+    } catch {
+      // Fall through to background service worker Gemini 2.5 Flash Lite call
+    }
+
+    try {
+      const runtime = chrome.runtime as unknown as {
+        sendMessage: (msg: unknown) => Promise<{ ok?: boolean; text?: string; error?: string } | undefined>;
+      };
+      const response = await runtime.sendMessage({
+        type: 'LEGALEASE_CLOUD_DRAFT',
+        prompt,
+        previousDraft,
+        apiKey: EXTENSION_API_KEY,
+      });
+      if (response?.ok && response.text?.trim()) {
+        return response.text.trim();
+      }
+      if (response?.error) {
+        cloudError = response.error;
+      }
+    } catch (err) {
+      cloudError = err instanceof Error ? err.message : String(err);
+      return null;
+    }
+    return null;
+  };
+
+  const fallbackOfflineOrThrow = (): string => {
+    if (!navigator.onLine || state.settings.sandboxMode) {
+      return getLocalTemplateDraft(prompt, previousDraft);
+    }
+    throw new Error(cloudError || 'Unable to generate legal draft: both on-device and cloud models failed.');
+  };
+
+  if (mode === 'only_on_device') {
+    return (await tryOnDevice()) ?? fallbackOfflineOrThrow();
+  }
+  if (mode === 'prefer_on_device') {
+    return (await tryOnDevice()) ?? (await tryCloud()) ?? fallbackOfflineOrThrow();
+  }
+  if (mode === 'prefer_in_cloud') {
+    return (await tryCloud()) ?? (await tryOnDevice()) ?? fallbackOfflineOrThrow();
+  }
+  return (await tryCloud()) ?? fallbackOfflineOrThrow();
+}
+
+function insertDraftIntoTarget(el: HTMLElement, text: string): void {
+  if (el instanceof HTMLTextAreaElement) {
+    const start = el.selectionStart ?? el.value.length;
+    const end = el.selectionEnd ?? el.value.length;
+    const before = el.value.slice(0, start);
+    const after = el.value.slice(end);
+    const spacer =
+      before.length > 0 && !before.endsWith('\n')
+        ? '\n\n'
+        : before.endsWith('\n') && !before.endsWith('\n\n')
+          ? '\n'
+          : '';
+    el.value = `${before}${spacer}${text}${after}`;
+    const nextPos = before.length + spacer.length + text.length;
+    el.setSelectionRange(nextPos, nextPos);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.focus();
+    return;
+  }
+
+  el.focus();
+  const sel = window.getSelection();
+  if (sel && sel.rangeCount > 0 && el.contains(sel.anchorNode)) {
+    const range = sel.getRangeAt(0);
+    let insertText = text;
+    if (range.collapsed) {
+      const preRange = document.createRange();
+      preRange.selectNodeContents(el);
+      preRange.setEnd(range.startContainer, range.startOffset);
+      const preText = preRange.toString();
+      if (preText.length > 0 && !preText.endsWith('\n')) {
+        insertText = `\n\n${text}`;
+      } else if (preText.endsWith('\n') && !preText.endsWith('\n\n')) {
+        insertText = `\n${text}`;
+      }
+    }
+    range.deleteContents();
+    const node = document.createTextNode(insertText);
+    range.insertNode(node);
+    range.setStartAfter(node);
+    range.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(range);
+  } else {
+    const current = el.innerText;
+    el.innerText = current.trim().length > 0 ? `${current.replace(/\s+$/, '')}\n\n${text}` : text;
+  }
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+const companionExplanationCache = new Map<string, string>();
+
+function formatCompanionText(text: string): string {
+  return escapeHtml(text).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+}
+
+async function explainSelection(selectedText: string, followUpQuestion?: string): Promise<string> {
+  const runtime = chrome.runtime as unknown as {
+    sendMessage: (msg: unknown) => Promise<{ ok?: boolean; text?: string; error?: string } | undefined>;
+  };
+  const documentContext = (document.body?.innerText || '').trim().slice(0, 12000);
+  const response = await runtime.sendMessage({
+    type: 'LEGALEASE_COMPANION_EXPLAIN',
+    selectedText,
+    documentContext,
+    followUpQuestion,
+    apiKey: EXTENSION_API_KEY,
+  });
+  if (response?.ok && response.text) {
+    return response.text;
+  }
+  throw new Error(response?.error || 'Unable to explain selection.');
+}
+
+function replaceSelectionInTarget(replacement: string): void {
+  const el = companionState.targetEl;
+  if (!el || !el.isConnected) return;
+  if (el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement) {
+    el.focus();
+    el.setRangeText(replacement, companionState.selectionStart, companionState.selectionEnd, 'select');
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    return;
+  }
+  if (companionState.savedRange) {
+    const sel = window.getSelection();
+    if (sel) {
+      sel.removeAllRanges();
+      sel.addRange(companionState.savedRange);
+    }
+    companionState.savedRange.deleteContents();
+    const node = document.createTextNode(replacement);
+    companionState.savedRange.insertNode(node);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+}
+
+function isRectInViewport(rect: DOMRect): boolean {
+  return (
+    rect.width > 0 &&
+    rect.height > 0 &&
+    rect.bottom > 0 &&
+    rect.top < window.innerHeight &&
+    rect.right > 0 &&
+    rect.left < window.innerWidth
+  );
+}
+
+function updateDraftPositions(shadow: ShadowRoot): void {
+  const shell = shadow.querySelector<HTMLDivElement>('.le-draft-shell');
+  const fab = shadow.querySelector<HTMLButtonElement>('.le-fab');
+  const isExpanded = companionState.isActive ? companionState.isOpen : draftState.isBarOpen;
+
+  if (fab) {
+    const flagCount = state.analysis?.clauses.length ?? 0;
+    const shouldShowFab =
+      (flagCount > 0 || isLegalPage() || state.isOpen) &&
+      !draftState.pillVisible &&
+      !draftState.isBarOpen &&
+      !companionState.isActive;
+    fab.style.display = shouldShowFab ? 'inline-flex' : 'none';
+  }
+
+  if (!shell) return;
+
+  if (companionState.isActive && companionState.anchorRect) {
+    shell.style.display = 'block';
+    const { left: anchorLeft, top: anchorTop } = companionState.anchorRect;
+    if (isExpanded) {
+      const barWidth = Math.min(400, window.innerWidth - 24);
+      const barHeight = shell.scrollHeight || 160;
+      const onRightSide = anchorLeft + 16 > window.innerWidth / 2;
+      const rawLeft = onRightSide ? anchorLeft + 32 - barWidth : anchorLeft;
+      shell.style.width = `${barWidth}px`;
+      shell.style.left = `${clamp(rawLeft, 12, Math.max(12, window.innerWidth - barWidth - 12))}px`;
+      shell.style.top = `${clamp(anchorTop, 12, Math.max(12, window.innerHeight - barHeight - 12))}px`;
+    } else {
+      shell.style.width = '32px';
+      shell.style.left = `${clamp(anchorLeft, 8, window.innerWidth - 40)}px`;
+      shell.style.top = `${clamp(anchorTop, 8, window.innerHeight - 40)}px`;
+    }
+    return;
+  }
+
+  const el = draftState.targetEl;
+  if (!el || !el.isConnected) {
+    shell.style.display = 'none';
+    return;
+  }
+  const rect = el.getBoundingClientRect();
+  const visible = isRectInViewport(rect);
+  if (!visible) {
+    shell.style.display = 'none';
+    return;
+  }
+  shell.style.display = 'block';
+  const defaultLeft = rect.right + 8;
+  const defaultTop = rect.bottom - 32;
+  const minLeft = Math.max(8, rect.left - 36);
+  const maxLeft = Math.min(window.innerWidth - 40, rect.right + 36 - 32);
+  const minTop = Math.max(8, rect.top - 36);
+  const maxTop = Math.min(window.innerHeight - 40, rect.bottom + 36 - 32);
+  const rawLeft = draftState.pillOffset ? rect.left + draftState.pillOffset.dx : defaultLeft;
+  const rawTop = draftState.pillOffset ? rect.top + draftState.pillOffset.dy : defaultTop;
+  const pillLeft = clamp(rawLeft, Math.min(minLeft, maxLeft), Math.max(minLeft, maxLeft));
+  const pillTop = clamp(rawTop, Math.min(minTop, maxTop), Math.max(minTop, maxTop));
+
+  if (isExpanded) {
+    const barWidth = Math.min(400, window.innerWidth - 24);
+    const barHeight = shell.scrollHeight || 110;
+    const onRightSide = pillLeft + 16 > window.innerWidth / 2;
+    const rawBarLeft = onRightSide ? pillLeft + 32 - barWidth : pillLeft;
+    shell.style.width = `${barWidth}px`;
+    shell.style.left = `${clamp(rawBarLeft, 12, Math.max(12, window.innerWidth - barWidth - 12))}px`;
+    shell.style.top = `${clamp(pillTop, 12, Math.max(12, window.innerHeight - barHeight - 12))}px`;
+  } else {
+    shell.style.width = '32px';
+    shell.style.left = `${pillLeft}px`;
+    shell.style.top = `${pillTop}px`;
+  }
+}
+
+function renderDraftLayer(shadow: ShadowRoot): void {
+  const layer = shadow.getElementById('le-draft-layer');
+  if (!layer) return;
+
+  const logoUrl = chrome.runtime.getURL('icons/legalease-logo.jpg');
+
+  if (companionState.isActive) {
+    if (!companionState.isOpen) {
+      layer.innerHTML = `
+        <div class="le-draft-shell">
+          <button class="le-draft-pill le-companion-pill" type="button" title="Explain selection with LegalEase"><img src="${escapeHtml(logoUrl)}" alt="LegalEase" draggable="false" /></button>
+        </div>
+      `;
+      updateDraftPositions(shadow);
+      layer.querySelector<HTMLButtonElement>('.le-companion-pill')?.addEventListener('click', () => {
+        const cached = companionExplanationCache.get(companionState.selectedText);
+        if (cached) {
+          companionState.isOpen = true;
+          companionState.isExplaining = false;
+          companionState.explanation = cached;
+          companionState.error = null;
+          renderDraftLayer(shadow);
+          return;
+        }
+        companionState.isOpen = true;
+        companionState.isExplaining = true;
+        companionState.error = null;
+        renderDraftLayer(shadow);
+        void explainSelection(companionState.selectedText)
+          .then((res) => {
+            companionExplanationCache.set(companionState.selectedText, res);
+            companionState.explanation = res;
+          })
+          .catch((err: unknown) => {
+            companionState.error = err instanceof Error ? err.message : 'Unable to explain selection.';
+          })
+          .finally(() => {
+            companionState.isExplaining = false;
+            renderDraftLayer(shadow);
+          });
+      });
+      return;
+    }
+
+    const explanationHtml = companionState.isExplaining
+      ? `<div class="le-draft-preview">
+          <div class="le-draft-shimmer-wrap">
+            <div class="le-draft-shimmer"></div>
+            <div class="le-draft-shimmer"></div>
+            <div class="le-draft-shimmer short"></div>
+          </div>
+        </div>`
+      : companionState.explanation
+        ? `<div class="le-draft-preview">${formatCompanionText(companionState.explanation)}</div>`
+        : '';
+
+    const rewritePreviewHtml = companionState.isRewriting
+      ? `<div class="le-draft-preview">
+          <div class="le-draft-shimmer-wrap">
+            <div class="le-draft-shimmer"></div>
+            <div class="le-draft-shimmer short"></div>
+          </div>
+        </div>`
+      : companionState.draftText
+        ? `<div class="le-draft-preview">${escapeHtml(companionState.draftText)}</div>`
+        : '';
+
+    const editableChipsHtml = companionState.isEditable
+      ? `<div class="le-draft-chips">
+          <button class="le-draft-chip le-companion-chip" type="button" data-chip="Fix this to favor me">Fix this to favor me</button>
+          <button class="le-draft-chip le-companion-chip" type="button" data-chip="Make formal">Make formal</button>
+        </div>`
+      : '';
+
+    const replaceActionHtml =
+      companionState.isEditable && !companionState.isRewriting && companionState.draftText
+        ? `<div class="le-draft-actions">
+            <button class="le-draft-insert le-companion-replace" type="button">Replace Selection</button>
+          </div>`
+        : '';
+
+    const hasPrompt = companionState.prompt.trim().length > 0;
+    const placeholder = companionState.isEditable
+      ? companionState.draftText
+        ? 'Refine rewrite...'
+        : 'How should I rewrite this?'
+      : 'Ask a follow-up question...';
+
+    layer.innerHTML = `
+      <div class="le-draft-shell expanded">
+        <div class="le-draft-bar has-preview" role="dialog" aria-label="LegalEase Companion">
+          <div style="display:flex;align-items:center;justify-content:space-between;font-weight:600;font-size:12px;color:#0B4F3A;">
+            <span>LegalEase Companion</span>
+            <button class="le-companion-close" type="button" aria-label="Close Companion" style="border:none;background:transparent;cursor:pointer;font-size:14px;color:#4B5563;">✕</button>
+          </div>
+          ${explanationHtml}
+          ${rewritePreviewHtml}
+          <div class="le-draft-row">
+            <span class="le-draft-sparkle" aria-hidden="true">✦</span>
+            <textarea rows="1" class="le-draft-input le-companion-input" placeholder="${placeholder}">${escapeHtml(companionState.prompt)}</textarea>
+            <button class="le-draft-submit le-companion-submit${hasPrompt ? ' visible' : ''}" type="button" aria-label="Send" ${companionState.isExplaining || companionState.isRewriting ? 'disabled' : ''}>↑</button>
+          </div>
+          ${editableChipsHtml}
+          ${replaceActionHtml}
+          ${companionState.error ? `<div class="le-draft-error">${escapeHtml(companionState.error)}</div>` : ''}
+        </div>
+      </div>
+    `;
+    updateDraftPositions(shadow);
+
+    const input = layer.querySelector<HTMLTextAreaElement>('.le-companion-input');
+    const submitBtn = layer.querySelector<HTMLButtonElement>('.le-companion-submit');
+
+    const runCompanionPrompt = async (promptOverride?: string) => {
+      const query = (promptOverride ?? input?.value ?? companionState.prompt).trim();
+      if (!query || companionState.isExplaining || companionState.isRewriting) return;
+      companionState.prompt = promptOverride ? '' : query;
+      companionState.error = null;
+      if (companionState.isEditable) {
+        companionState.isRewriting = true;
+        renderDraftLayer(shadow);
+        try {
+          const baseText = companionState.draftText || companionState.selectedText;
+          companionState.draftText = await generateLegalDraft(query, baseText);
+          companionState.prompt = '';
+        } catch (err: unknown) {
+          companionState.error = err instanceof Error ? err.message : 'Unable to rewrite selection.';
+        } finally {
+          companionState.isRewriting = false;
+          renderDraftLayer(shadow);
+        }
+      } else {
+        companionState.isExplaining = true;
+        renderDraftLayer(shadow);
+        try {
+          companionState.explanation = await explainSelection(companionState.selectedText, query);
+          companionState.prompt = '';
+        } catch (err: unknown) {
+          companionState.error = err instanceof Error ? err.message : 'Unable to answer follow-up.';
+        } finally {
+          companionState.isExplaining = false;
+          renderDraftLayer(shadow);
+        }
+      }
+    };
+
+    input?.addEventListener('mousedown', (e: MouseEvent) => {
+      e.stopPropagation();
+    });
+    input?.addEventListener('input', () => {
+      companionState.prompt = input.value;
+      submitBtn?.classList.toggle('visible', input.value.trim().length > 0);
+    });
+    input?.addEventListener('keydown', (e: KeyboardEvent) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        void runCompanionPrompt();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        companionState.isActive = false;
+        companionState.isOpen = false;
+        renderDraftLayer(shadow);
+      }
+    });
+    submitBtn?.addEventListener('click', () => void runCompanionPrompt());
+    layer.querySelectorAll<HTMLButtonElement>('.le-companion-chip').forEach((chip) => {
+      chip.addEventListener('click', () => {
+        const val = chip.getAttribute('data-chip') || '';
+        void runCompanionPrompt(val);
+      });
+    });
+    layer.querySelector<HTMLButtonElement>('.le-companion-replace')?.addEventListener('click', () => {
+      if (companionState.draftText) {
+        replaceSelectionInTarget(companionState.draftText);
+      }
+      companionState.isActive = false;
+      companionState.isOpen = false;
+      companionState.draftText = '';
+      companionState.prompt = '';
+      renderDraftLayer(shadow);
+    });
+    layer.querySelector<HTMLButtonElement>('.le-companion-close')?.addEventListener('click', () => {
+      companionState.isActive = false;
+      companionState.isOpen = false;
+      renderDraftLayer(shadow);
+    });
+    return;
+  }
+
+  if (!draftState.pillVisible || !draftState.targetEl || !draftState.targetEl.isConnected) {
+    layer.innerHTML = '';
+    updateDraftPositions(shadow);
+    return;
+  }
+
+  const chipsHtml =
+    !draftState.isGenerating && draftState.draftText
+      ? `<div class="le-draft-chips">
+          <button class="le-draft-chip" type="button" data-chip="Add Protections">Add Protections</button>
+          <button class="le-draft-chip" type="button" data-chip="Make Mutual">Make Mutual</button>
+          <button class="le-draft-chip" type="button" data-chip="Tighten Terms">Tighten Terms</button>
+        </div>`
+      : '';
+
+  const previewHtml = draftState.isGenerating
+    ? `<div class="le-draft-preview">
+        <div class="le-draft-shimmer-wrap">
+          <div class="le-draft-shimmer"></div>
+          <div class="le-draft-shimmer"></div>
+          <div class="le-draft-shimmer short"></div>
+        </div>
+      </div>`
+    : draftState.draftText
+      ? `<div class="le-draft-preview">${escapeHtml(draftState.draftText)}</div>`
+      : '';
+
+  const actionsHtml =
+    !draftState.isGenerating && draftState.draftText
+      ? `<div class="le-draft-actions">
+          <button class="le-draft-recreate" type="button">↻ Redraft</button>
+          <button class="le-draft-insert" type="button">Insert</button>
+        </div>`
+      : '';
+
+  const hasPreview = Boolean(previewHtml);
+  const hasPrompt = draftState.prompt.trim().length > 0;
+  const barHtml = draftState.isBarOpen
+    ? `<div class="le-draft-bar${hasPreview ? ' has-preview' : ''}" role="dialog" aria-label="LegalEase Draft & Refine">
+        ${previewHtml}
+        <div class="le-draft-row">
+          <span class="le-draft-sparkle" aria-hidden="true">✦</span>
+          <textarea rows="1" class="le-draft-input" placeholder="${draftState.draftText ? 'Refine this draft...' : 'Describe your contract or clause...'}">${escapeHtml(draftState.prompt)}</textarea>
+          <button class="le-draft-submit${hasPrompt ? ' visible' : ''}" type="button" aria-label="Send prompt" ${draftState.isGenerating ? 'disabled' : ''}>↑</button>
+        </div>
+        ${chipsHtml}
+        ${actionsHtml}
+        ${draftState.error ? `<div class="le-draft-error">${escapeHtml(draftState.error)}</div>` : ''}
+      </div>`
+    : '';
+
+  layer.innerHTML = `
+    <div class="le-draft-shell${draftState.isBarOpen ? ' expanded' : ''}">
+      ${draftState.isBarOpen ? barHtml : `<button class="le-draft-pill" type="button" title="Draft with LegalEase (Ctrl+J)"><img src="${escapeHtml(logoUrl)}" alt="LegalEase" draggable="false" /></button>`}
+    </div>
+  `;
+
+  updateDraftPositions(shadow);
+
+  const pill = layer.querySelector<HTMLButtonElement>('.le-draft-pill');
+  if (pill) {
+    let startX = 0;
+    let startY = 0;
+    let originLeft = 0;
+    let originTop = 0;
+    let isDragging = false;
+    let suppressNextClick = false;
+
+    pill.addEventListener('pointerdown', (e: PointerEvent) => {
+      if (e.button !== 0) return;
+      const pRect = pill.getBoundingClientRect();
+      startX = e.clientX;
+      startY = e.clientY;
+      originLeft = pRect.left;
+      originTop = pRect.top;
+      isDragging = false;
+      pill.setPointerCapture(e.pointerId);
+    });
+
+    pill.addEventListener('pointermove', (e: PointerEvent) => {
+      if (!pill.hasPointerCapture(e.pointerId) || !draftState.targetEl) return;
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+      if (!isDragging && Math.hypot(dx, dy) > 4) {
+        isDragging = true;
+        suppressNextClick = true;
+      }
+      if (!isDragging) return;
+      const rect = draftState.targetEl.getBoundingClientRect();
+      const minLeft = Math.max(8, rect.left - 36);
+      const maxLeft = Math.min(window.innerWidth - 40, rect.right + 36 - 32);
+      const minTop = Math.max(8, rect.top - 36);
+      const maxTop = Math.min(window.innerHeight - 40, rect.bottom + 36 - 32);
+      const nextLeft = clamp(originLeft + dx, Math.min(minLeft, maxLeft), Math.max(minLeft, maxLeft));
+      const nextTop = clamp(originTop + dy, Math.min(minTop, maxTop), Math.max(minTop, maxTop));
+      pill.style.left = `${nextLeft}px`;
+      pill.style.top = `${nextTop}px`;
+      draftState.pillOffset = { dx: nextLeft - rect.left, dy: nextTop - rect.top };
+    });
+
+    pill.addEventListener('pointerup', (e: PointerEvent) => {
+      if (pill.hasPointerCapture(e.pointerId)) {
+        pill.releasePointerCapture(e.pointerId);
+      }
+    });
+
+    pill.addEventListener('click', () => {
+      if (suppressNextClick) {
+        suppressNextClick = false;
+        return;
+      }
+      draftState.isBarOpen = true;
+      renderDraftLayer(shadow);
+      layer.querySelector<HTMLTextAreaElement>('.le-draft-input')?.focus();
+    });
+  }
+
+  const input = layer.querySelector<HTMLTextAreaElement>('.le-draft-input');
+  const submitBtn = layer.querySelector<HTMLButtonElement>('.le-draft-submit');
+
+  const runDraft = async (promptOverride?: string) => {
+    const query = (promptOverride ?? input?.value ?? draftState.prompt).trim();
+    if (!query || draftState.isGenerating) return;
+    draftState.prompt = promptOverride ? '' : query;
+    draftState.isGenerating = true;
+    draftState.error = null;
+    renderDraftLayer(shadow);
+    try {
+      const result = await generateLegalDraft(query, draftState.draftText || undefined);
+      draftState.draftText = result;
+      draftState.prompt = '';
+    } catch (err) {
+      draftState.error = err instanceof Error ? err.message : 'Unable to generate draft.';
+    } finally {
+      draftState.isGenerating = false;
+      renderDraftLayer(shadow);
+      layer.querySelector<HTMLTextAreaElement>('.le-draft-input')?.focus();
+    }
+  };
+
+  const syncDraftInputLayout = () => {
+    if (!input) return;
+    input.style.height = 'auto';
+    const nextHeight = Math.min(input.scrollHeight, 140);
+    input.style.height = `${nextHeight}px`;
+    const barEl = layer.querySelector<HTMLDivElement>('.le-draft-bar');
+    barEl?.classList.toggle('multiline', input.scrollHeight > 34);
+    submitBtn?.classList.toggle('visible', input.value.trim().length > 0);
+  };
+
+  if (input && input.value) {
+    syncDraftInputLayout();
+  }
+
+  input?.addEventListener('input', () => {
+    draftState.prompt = input.value;
+    syncDraftInputLayout();
+  });
+
+  input?.addEventListener('keydown', (e: KeyboardEvent) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      void runDraft();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      draftState.isBarOpen = false;
+      renderDraftLayer(shadow);
+      draftState.targetEl?.focus();
+    }
+  });
+
+  submitBtn?.addEventListener('click', () => {
+    void runDraft();
+  });
+
+  layer.querySelectorAll<HTMLButtonElement>('.le-draft-chip').forEach((chip) => {
+    chip.addEventListener('click', () => {
+      const val = chip.getAttribute('data-chip') || '';
+      void runDraft(val);
+    });
+  });
+
+  layer.querySelector<HTMLButtonElement>('.le-draft-recreate')?.addEventListener('click', () => {
+    void runDraft('Recreate this legal draft with a fresh variation');
+  });
+
+  layer.querySelector<HTMLButtonElement>('.le-draft-insert')?.addEventListener('click', () => {
+    if (draftState.targetEl && draftState.draftText) {
+      insertDraftIntoTarget(draftState.targetEl, draftState.draftText);
+    }
+    draftState.isBarOpen = false;
+    draftState.draftText = '';
+    draftState.prompt = '';
+    renderDraftLayer(shadow);
+  });
+
+  layer.querySelector<HTMLButtonElement>('.le-draft-close')?.addEventListener('click', () => {
+    draftState.isBarOpen = false;
+    renderDraftLayer(shadow);
+    draftState.targetEl?.focus();
+  });
 }
 
 function init(): void {
@@ -1330,12 +2377,115 @@ function init(): void {
     if (!state.settings.autoScan) return;
     const el = getEditableElement(e.target);
     if (!el) return;
+    draftState.targetEl = el;
+    draftState.pillVisible = true;
+    renderDraftLayer(shadow);
     const text = getEditableText(el);
     if (!isLikelyLegalText(text)) return;
     state.isEditableContext = true;
     activeEditableEl = el;
     runLocalScan(shadow, text);
   });
+
+  document.addEventListener('keydown', (e: KeyboardEvent) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'j') {
+      const el = getEditableElement(document.activeElement) ?? draftState.targetEl;
+      if (!el) return;
+      e.preventDefault();
+      draftState.targetEl = el;
+      draftState.pillVisible = true;
+      draftState.isBarOpen = true;
+      renderDraftLayer(shadow);
+      shadow.querySelector<HTMLTextAreaElement>('.le-draft-input')?.focus();
+    }
+  });
+
+  window.addEventListener('scroll', () => updateDraftPositions(shadow), { capture: true, passive: true });
+  window.addEventListener('resize', () => updateDraftPositions(shadow), { passive: true });
+
+  document.addEventListener('pointerdown', (e: PointerEvent) => {
+    const target = e.target as Node | null;
+    if (target && (target === host || host.contains(target))) return;
+    let changed = false;
+    if (draftState.isBarOpen) {
+      draftState.isBarOpen = false;
+      changed = true;
+    }
+    if (companionState.isOpen) {
+      companionState.isActive = false;
+      companionState.isOpen = false;
+      changed = true;
+    }
+    if (changed) {
+      renderDraftLayer(shadow);
+    }
+  });
+
+  const handleSelectionChange = (e: Event) => {
+    const target = e.target as Node | null;
+    if (target && (target === host || host.contains(target))) return;
+    if (companionDebounceTimer !== null) {
+      window.clearTimeout(companionDebounceTimer);
+    }
+    companionDebounceTimer = window.setTimeout(() => {
+      companionDebounceTimer = null;
+      const activeEl = document.activeElement;
+      const editableEl = getEditableElement(activeEl);
+      let selectedText = '';
+      let isEditable = false;
+      let selectionStart = 0;
+      let selectionEnd = 0;
+      let savedRange: Range | null = null;
+      let anchorRect: { left: number; top: number } | null = null;
+
+      if (editableEl instanceof HTMLTextAreaElement || editableEl instanceof HTMLInputElement) {
+        selectionStart = editableEl.selectionStart ?? 0;
+        selectionEnd = editableEl.selectionEnd ?? 0;
+        selectedText = editableEl.value.slice(selectionStart, selectionEnd).trim();
+        if (selectedText.length >= 20) {
+          isEditable = true;
+          const rect = editableEl.getBoundingClientRect();
+          anchorRect = { left: rect.right - 36, top: rect.bottom - 36 };
+        }
+      } else {
+        const sel = window.getSelection();
+        selectedText = sel?.toString().trim() ?? '';
+        if (selectedText.length >= 20 && sel && sel.rangeCount > 0) {
+          const range = sel.getRangeAt(0);
+          savedRange = range.cloneRange();
+          const rects = range.getClientRects();
+          const lastRect = rects.length > 0 ? rects[rects.length - 1] : range.getBoundingClientRect();
+          anchorRect = { left: lastRect.right + 6, top: lastRect.bottom - 16 };
+          isEditable = Boolean(editableEl && editableEl.contains(range.commonAncestorContainer));
+        }
+      }
+
+      if (selectedText.length < 20 || !anchorRect) return;
+
+      companionState.isActive = true;
+      companionState.isOpen = false;
+      companionState.selectedText = selectedText;
+      companionState.isEditable = isEditable;
+      companionState.targetEl = isEditable ? editableEl : null;
+      companionState.selectionStart = selectionStart;
+      companionState.selectionEnd = selectionEnd;
+      companionState.savedRange = savedRange;
+      companionState.anchorRect = anchorRect;
+      companionState.explanation = '';
+      companionState.draftText = '';
+      companionState.prompt = '';
+      companionState.error = null;
+
+      if (state.isOpen) {
+        state.isOpen = false;
+        render(shadow);
+      }
+      renderDraftLayer(shadow);
+    }, 180);
+  };
+
+  document.addEventListener('mouseup', handleSelectionChange);
+  document.addEventListener('keyup', handleSelectionChange);
 
   document.addEventListener('input', (e: Event) => {
     if (!state.settings.autoScan) return;
