@@ -106,6 +106,7 @@ interface ContentState {
   historyTab: 'reports' | 'companion';
   reportHistory: ReportHistoryItem[];
   companionHistory: CompanionHistoryItem[];
+  selectedCompanionHistory: CompanionHistoryItem | null;
   isScanning: boolean;
   hasScanned: boolean;
   isEditableContext: boolean;
@@ -198,6 +199,7 @@ const state: ContentState = {
   historyTab: 'reports',
   reportHistory: [],
   companionHistory: [],
+  selectedCompanionHistory: null,
   isScanning: false,
   hasScanned: false,
   isEditableContext: false,
@@ -967,6 +969,59 @@ function getShadowStyles(): string {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.le-btn-back-history {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid #E5E7EB;
+  background: #FFFFFF;
+  color: #111111;
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 0.82em;
+  font-weight: 600;
+  cursor: pointer;
+  margin-bottom: 10px;
+}
+.le-btn-back-history:hover {
+  background: #F3F4F6;
+}
+.le-history-quote {
+  font-size: 0.8em;
+  color: #4B5563;
+  background: #F9FAFB;
+  border-left: 3px solid #D1D5DB;
+  padding: 8px 10px;
+  border-radius: 6px;
+  margin-bottom: 12px;
+  line-height: 1.4;
+}
+.le-history-thread {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.le-history-bubble {
+  padding: 9px 12px;
+  border-radius: 10px;
+  font-size: 0.86em;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.le-history-bubble.user {
+  align-self: flex-end;
+  max-width: 85%;
+  background: #111111;
+  color: #FFFFFF;
+}
+.le-history-bubble.assistant {
+  align-self: flex-start;
+  max-width: 92%;
+  background: #F3F4F6;
+  color: #111111;
+  border: 1px solid #E5E7EB;
+}
 .le-score-bar {
   display: flex;
   align-items: center;
@@ -1460,11 +1515,19 @@ function fillPlaceholdersLocally(text: string, profile: PrivateProfile): string 
 }
 
 function getFillablePageFields(): Array<HTMLInputElement | HTMLTextAreaElement> {
-  const excludedTypes = new Set(['hidden', 'submit', 'button', 'reset', 'file', 'checkbox', 'radio', 'password']);
+  const excludedTypes = new Set(['hidden', 'submit', 'button', 'reset', 'file', 'checkbox', 'radio', 'password', 'search']);
   const results: Array<HTMLInputElement | HTMLTextAreaElement> = [];
   document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('input, textarea').forEach((el) => {
     if (el.disabled || el.readOnly) return;
     if (el instanceof HTMLInputElement && excludedTypes.has((el.type || 'text').toLowerCase())) return;
+    if (el.getAttribute('role')?.toLowerCase() === 'searchbox') return;
+    const hint = [
+      el.name || '',
+      el.id || '',
+      el.placeholder || '',
+      el.getAttribute('aria-label') || ''
+    ].join(' ');
+    if (/search|filter/i.test(hint)) return;
     const rect = el.getBoundingClientRect();
     if (rect.width === 0 || rect.height === 0) return;
     results.push(el);
@@ -1473,7 +1536,7 @@ function getFillablePageFields(): Array<HTMLInputElement | HTMLTextAreaElement> 
 }
 
 function hasFillablePageForms(): boolean {
-  return getFillablePageFields().length > 0;
+  return getFillablePageFields().length >= 2;
 }
 
 function autoFillPageForms(profile: PrivateProfile): number {
@@ -1531,7 +1594,7 @@ function render(shadow: ShadowRoot): void {
 
   if (!state.isOpen) {
     wasDrawerOpen = false;
-    const showFab = (flagCount > 0 || isLegalPage()) && !draftState.pillVisible && !draftState.isBarOpen;
+    const showFab = (flagCount > 0 || isLegalPage()) && !draftState.isBarOpen && !companionState.isActive;
     shadow.innerHTML = `
       <style>${getShadowStyles()}</style>
       ${showFab ? `<button class="le-fab${state.isScanning ? ' is-scanning' : ''}" type="button" title="Open LegalEase Audit" style="${getFabStyle(state.badgePos)}">
@@ -1879,7 +1942,19 @@ function render(shadow: ShadowRoot): void {
                   </button>`
                     )
                     .join('')
-              : state.companionHistory.length === 0
+              : state.selectedCompanionHistory
+                ? `
+                  <button class="le-btn-back-history" type="button">← Back to History</button>
+                  <div class="le-history-quote">"${escapeHtml(state.selectedCompanionHistory.selectedText)}"</div>
+                  <div class="le-history-thread">
+                    ${state.selectedCompanionHistory.messages
+                      .map(
+                        (msg) => `
+                      <div class="le-history-bubble ${msg.role === 'user' ? 'user' : 'assistant'}">${escapeHtml(msg.text)}</div>`
+                      )
+                      .join('')}
+                  </div>`
+                : state.companionHistory.length === 0
                 ? '<div class="le-empty">No saved Companion threads yet.</div>'
                 : state.companionHistory
                     .map(
@@ -1929,6 +2004,7 @@ function render(shadow: ShadowRoot): void {
 
   shadow.querySelector('.le-btn-history')?.addEventListener('click', async () => {
     state.historyOpen = !state.historyOpen;
+    state.selectedCompanionHistory = null;
     if (state.historyOpen) {
       state.settingsOpen = false;
       try {
@@ -2007,24 +2083,14 @@ function render(shadow: ShadowRoot): void {
       const id = btn.getAttribute('data-companion-id');
       const found = state.companionHistory.find((entry) => entry.id === id);
       if (!found) return;
-      const lastAssistant = [...found.messages].reverse().find((m) => m.role === 'assistant');
-      companionState.isActive = true;
-      companionState.isOpen = true;
-      companionState.isEditable = false;
-      companionState.selectedText = found.selectedText;
-      companionState.explanation = lastAssistant?.text || '';
-      companionState.messages = [...found.messages];
-      companionState.historyId = found.id;
-      companionState.error = null;
-      companionState.anchorRect = companionState.anchorRect || {
-        left: Math.max(16, window.innerWidth - 420),
-        top: Math.max(80, window.innerHeight - 260),
-        bottom: Math.max(120, window.innerHeight - 220)
-      };
-      state.historyOpen = false;
+      state.selectedCompanionHistory = found;
       render(shadow);
-      renderDraftLayer(shadow);
     });
+  });
+
+  shadow.querySelector('.le-btn-back-history')?.addEventListener('click', () => {
+    state.selectedCompanionHistory = null;
+    render(shadow);
   });
 
   attachStrictScrollLock(shadow.querySelector<HTMLElement>('.le-body'));
@@ -2695,7 +2761,6 @@ function updateDraftPositions(shadow: ShadowRoot): void {
     const flagCount = state.analysis?.clauses.length ?? 0;
     const shouldShowFab =
       (flagCount > 0 || isLegalPage() || state.isOpen) &&
-      !draftState.pillVisible &&
       !draftState.isBarOpen &&
       !companionState.isActive;
     fab.style.display = shouldShowFab ? 'inline-flex' : 'none';
@@ -2707,17 +2772,19 @@ function updateDraftPositions(shadow: ShadowRoot): void {
     const activeSelEl = document.querySelector('.le-companion-active-sel');
     let liveRect: DOMRect | null = null;
     if (activeSelEl) {
-      liveRect = activeSelEl.getBoundingClientRect();
+      const rects = activeSelEl.getClientRects();
+      liveRect = rects.length > 0 ? rects[rects.length - 1] : activeSelEl.getBoundingClientRect();
     } else {
       const sel = window.getSelection();
       if (sel && sel.rangeCount > 0 && !sel.isCollapsed) {
-        liveRect = sel.getRangeAt(0).getBoundingClientRect();
+        const rects = sel.getRangeAt(0).getClientRects();
+        liveRect = rects.length > 0 ? rects[rects.length - 1] : sel.getRangeAt(0).getBoundingClientRect();
       }
     }
     if (liveRect && (liveRect.width > 0 || liveRect.height > 0)) {
       companionState.anchorRect = {
-        left: liveRect.left,
-        top: liveRect.top,
+        left: liveRect.right + 6,
+        top: liveRect.bottom - 16,
         bottom: liveRect.bottom,
       };
     }
