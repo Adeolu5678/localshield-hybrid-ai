@@ -101,6 +101,7 @@ interface CompanionHistoryItem {
 interface ContentState {
   isOpen: boolean;
   settingsOpen: boolean;
+  privateProfileOpen: boolean;
   historyOpen: boolean;
   historyTab: 'reports' | 'companion';
   reportHistory: ReportHistoryItem[];
@@ -127,6 +128,7 @@ interface DraftState {
   targetEl: HTMLElement | null;
   pillVisible: boolean;
   isBarOpen: boolean;
+  isFormFillPromptOpen: boolean;
   prompt: string;
   draftText: string;
   isGenerating: boolean;
@@ -138,6 +140,7 @@ const draftState: DraftState = {
   targetEl: null,
   pillVisible: false,
   isBarOpen: false,
+  isFormFillPromptOpen: false,
   prompt: '',
   draftText: '',
   isGenerating: false,
@@ -190,6 +193,7 @@ let companionDebounceTimer: number | null = null;
 const state: ContentState = {
   isOpen: false,
   settingsOpen: false,
+  privateProfileOpen: false,
   historyOpen: false,
   historyTab: 'reports',
   reportHistory: [],
@@ -550,6 +554,18 @@ function runLocalScan(shadow: ShadowRoot, sourceText?: string): void {
           state.isOpen = true;
           state.expandedClauseId = clauseId;
           render(shadow);
+        if (state.settings.privateProfileEnabled && !companionState.isActive) {
+          const sel = window.getSelection();
+          if (!sel || sel.toString().trim().length === 0) {
+            const fields = getFillablePageFields();
+            if (fields.length > 0) {
+              draftState.targetEl = fields[0];
+              draftState.pillVisible = true;
+              draftState.pillOffset = null;
+              renderDraftLayer(shadow);
+            }
+          }
+        }
           const target = shadow.querySelector(`[data-card-id="${clauseId}"]`);
           target?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
         });
@@ -850,6 +866,8 @@ function getShadowStyles(): string {
   font-size: 0.88em;
   font-weight: 600;
   cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .le-btn-scan:hover {
   background: #083D2D;
@@ -1616,6 +1634,18 @@ function render(shadow: ShadowRoot): void {
           runLocalScan(shadow);
         } else {
           render(shadow);
+        if (state.settings.privateProfileEnabled && !companionState.isActive) {
+          const sel = window.getSelection();
+          if (!sel || sel.toString().trim().length === 0) {
+            const fields = getFillablePageFields();
+            if (fields.length > 0) {
+              draftState.targetEl = fields[0];
+              draftState.pillVisible = true;
+              draftState.pillOffset = null;
+              renderDraftLayer(shadow);
+            }
+          }
+        }
         }
       });
     }
@@ -1765,22 +1795,29 @@ function render(shadow: ShadowRoot): void {
       </label>
       ${
         state.settings.privateProfileEnabled
-          ? `<div class="le-profile-form" style="display:flex;flex-direction:column;gap:8px;margin-top:6px;padding:10px;border:1px solid #d1e7dd;border-radius:8px;background:#f8fbf9;">
-              <div style="font-size:11px;font-weight:600;color:#0B4F3A;">On-Device Private Profile (Never Sent to Cloud)</div>
-              <input class="le-input" id="le-profile-full-name" type="text" placeholder="Full Name" value="${escapeHtml(state.privateProfile.fullName)}" />
-              <input class="le-input" id="le-profile-company" type="text" placeholder="Company / Entity" value="${escapeHtml(state.privateProfile.company)}" />
-              <input class="le-input" id="le-profile-role" type="text" placeholder="Role / Title" value="${escapeHtml(state.privateProfile.role)}" />
-              <input class="le-input" id="le-profile-email" type="email" placeholder="Email" value="${escapeHtml(state.privateProfile.email)}" />
-              <input class="le-input" id="le-profile-phone" type="tel" placeholder="Phone" value="${escapeHtml(state.privateProfile.phone)}" />
-              <input class="le-input" id="le-profile-address" type="text" placeholder="Address" value="${escapeHtml(state.privateProfile.address)}" />
-              <div style="display:flex;align-items:center;gap:6px;margin-top:4px;">
-                <input id="le-signature-file" type="file" accept="image/*" style="display:none;" />
-                <button class="le-btn-scan" id="le-btn-upload-sig" type="button" style="flex:1;">Upload Signature (Auto-Strip Background)</button>
-                ${state.signatureDataUrl ? '<button class="le-btn-scan" id="le-btn-clear-sig" type="button">Clear</button>' : ''}
-              </div>
-            </div>`
+          ? `<button class="le-btn-scan" id="le-btn-manage-profile" type="button" style="width:100%;margin-top:6px;display:inline-flex;align-items:center;justify-content:center;gap:6px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg><span>Manage Private Profile</span></button>`
           : ''
       }
+    </div>
+  `;
+
+  const privateProfileHtml = `
+    <div class="le-settings">
+      <button class="le-btn-scan" id="le-btn-back-to-settings" type="button" style="align-self:flex-start;margin-bottom:8px;">← Back to Settings</button>
+      <div class="le-profile-form" style="display:flex;flex-direction:column;gap:8px;padding:10px;border:1px solid #d1e7dd;border-radius:8px;background:#f8fbf9;">
+        <div style="font-size:11px;font-weight:600;color:#0B4F3A;">On-Device Private Profile (Unlocked for Session)</div>
+        <input class="le-input" id="le-profile-full-name" type="text" placeholder="Full Name" value="${escapeHtml(state.privateProfile.fullName)}" />
+        <input class="le-input" id="le-profile-company" type="text" placeholder="Company / Entity" value="${escapeHtml(state.privateProfile.company)}" />
+        <input class="le-input" id="le-profile-role" type="text" placeholder="Role / Title" value="${escapeHtml(state.privateProfile.role)}" />
+        <input class="le-input" id="le-profile-email" type="email" placeholder="Email" value="${escapeHtml(state.privateProfile.email)}" />
+        <input class="le-input" id="le-profile-phone" type="tel" placeholder="Phone" value="${escapeHtml(state.privateProfile.phone)}" />
+        <input class="le-input" id="le-profile-address" type="text" placeholder="Address" value="${escapeHtml(state.privateProfile.address)}" />
+        <div style="display:flex;align-items:center;gap:6px;margin-top:4px;">
+          <input id="le-signature-file" type="file" accept="image/*" style="display:none;" />
+          <button class="le-btn-scan" id="le-btn-upload-sig" type="button" style="flex:1;">Upload Signature (Auto-Strip Background)</button>
+          ${state.signatureDataUrl ? '<button class="le-btn-scan" id="le-btn-clear-sig" type="button">Clear</button>' : ''}
+        </div>
+      </div>
     </div>
   `;
 
@@ -1796,9 +1833,12 @@ function render(shadow: ShadowRoot): void {
           </div>
         </div>
         <div class="le-actions">
-          ${state.settings.privateProfileEnabled && hasFillablePageForms() ? '<button class="le-btn-scan le-btn-fill-form" type="button" title="Auto-fill visible form fields locally">Fill Form</button>' : ''}
           ${state.signatureDataUrl ? '<button class="le-btn-scan le-btn-copy-sig" type="button" title="Copy transparent PNG signature to clipboard">Copy Signature</button>' : ''}
-          <button class="le-btn-scan" type="button">${state.isScanning ? 'Scanning...' : 'Scan Page'}</button>
+          ${
+            (state.analysis?.clauses?.length ?? 0) > 0 || state.analysis !== null
+              ? `<button class="le-btn-scan le-btn-scan-refresh" type="button" data-tooltip="Run another scan" aria-label="Run another scan" style="width:28px;height:28px;padding:0;border-radius:9999px;display:inline-flex;align-items:center;justify-content:center;font-size:1.05em;">${state.isScanning ? '…' : '↻'}</button>`
+              : `<button class="le-btn-scan" type="button">${state.isScanning ? 'Scanning...' : 'Scan Page'}</button>`
+          }
           <button class="le-btn-history${state.historyOpen ? ' active' : ''}" type="button" aria-label="History" title="History">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M3 12a9 9 0 1 0 3-6.7L3 8" />
@@ -1811,9 +1851,11 @@ function render(shadow: ShadowRoot): void {
         </div>
       </div>
       ${
-        state.settingsOpen
-          ? `<div class="le-body">${settingsHtml}</div>`
-          : state.historyOpen
+        state.privateProfileOpen
+          ? `<div class="le-body">${privateProfileHtml}</div>`
+          : state.settingsOpen
+            ? `<div class="le-body">${settingsHtml}</div>`
+            : state.historyOpen
             ? `
       <div class="le-history-tabs">
         <button class="le-history-tab${state.historyTab === 'reports' ? ' active' : ''}" type="button" data-history-tab="reports">Reports (${state.reportHistory.length})</button>
@@ -1833,7 +1875,7 @@ function render(shadow: ShadowRoot): void {
                       <span>${escapeHtml(item.pageTitle)}</span>
                       <span class="le-pill">${item.riskScore}/100</span>
                     </div>
-                    <div class="le-history-item-meta">${item.flags.length} flags · ${escapeHtml(item.url)}</div>
+                    <div class="le-history-item-meta">${item.flags.length} flags · ${escapeHtml(new Date(item.scannedAt).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }))} · ${escapeHtml(item.url)}</div>
                   </button>`
                     )
                     .join('')
@@ -1847,7 +1889,7 @@ function render(shadow: ShadowRoot): void {
                       <span>${escapeHtml(item.pageTitle)}</span>
                       <span class="le-pill">${item.messages.length} msgs</span>
                     </div>
-                    <div class="le-history-item-meta">${escapeHtml(item.selectedText.slice(0, 90))}</div>
+                    <div class="le-history-item-meta">${escapeHtml(new Date(item.updatedAt).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }))} · ${escapeHtml(item.selectedText.slice(0, 90))}</div>
                   </button>`
                     )
                     .join('')
@@ -1863,6 +1905,7 @@ function render(shadow: ShadowRoot): void {
         <div class="le-meta-pills">
           <span class="le-pill">${flagCount} flags</span>
           <span class="le-pill">${state.redactedCount} ${state.redactedCount === 1 ? 'private detail' : 'private details'} hidden</span>
+          ${state.settings.privateProfileEnabled && hasFillablePageForms() ? '<button class="le-pill le-btn-fill-form" type="button" title="Auto-fill visible form fields locally" style="cursor:pointer;">Fill Form</button>' : ''}
         </div>
       </div>
       <div class="le-body">
@@ -1884,10 +1927,24 @@ function render(shadow: ShadowRoot): void {
     render(shadow);
   });
 
-  shadow.querySelector('.le-btn-history')?.addEventListener('click', () => {
+  shadow.querySelector('.le-btn-history')?.addEventListener('click', async () => {
     state.historyOpen = !state.historyOpen;
     if (state.historyOpen) {
       state.settingsOpen = false;
+      try {
+        const stored = await chrome.storage?.local?.get([
+          'legalease_report_history',
+          'legalease_companion_history',
+        ]);
+        if (Array.isArray(stored?.legalease_report_history)) {
+          state.reportHistory = stored.legalease_report_history;
+        }
+        if (Array.isArray(stored?.legalease_companion_history)) {
+          state.companionHistory = stored.legalease_companion_history;
+        }
+      } catch {
+        // Ignore storage read errors
+      }
     }
     render(shadow);
   });
@@ -1896,6 +1953,7 @@ function render(shadow: ShadowRoot): void {
     state.settingsOpen = !state.settingsOpen;
     if (state.settingsOpen) {
       state.historyOpen = false;
+      state.privateProfileOpen = false;
     }
     render(shadow);
   });
@@ -1906,6 +1964,18 @@ function render(shadow: ShadowRoot): void {
       if (tab === 'reports' || tab === 'companion') {
         state.historyTab = tab;
         render(shadow);
+        if (state.settings.privateProfileEnabled && !companionState.isActive) {
+          const sel = window.getSelection();
+          if (!sel || sel.toString().trim().length === 0) {
+            const fields = getFillablePageFields();
+            if (fields.length > 0) {
+              draftState.targetEl = fields[0];
+              draftState.pillVisible = true;
+              draftState.pillOffset = null;
+              renderDraftLayer(shadow);
+            }
+          }
+        }
       }
     });
   });
@@ -2041,7 +2111,22 @@ function render(shadow: ShadowRoot): void {
   bindProfileInput('#le-profile-phone', 'phone');
   bindProfileInput('#le-profile-address', 'address');
 
-  shadow.querySelector('.le-btn-fill-form')?.addEventListener('click', () => {
+  shadow.querySelector('#le-btn-manage-profile')?.addEventListener('click', async () => {
+    if (!(await ensureProfileUnlocked(shadow))) return;
+    state.privateProfileOpen = true;
+    state.settingsOpen = false;
+    render(shadow);
+  });
+
+  shadow.querySelector('#le-btn-back-to-settings')?.addEventListener('click', () => {
+    state.privateProfileOpen = false;
+    state.settingsOpen = true;
+    isProfileUnlocked = false;
+    render(shadow);
+  });
+
+  shadow.querySelector('.le-btn-fill-form')?.addEventListener('click', async () => {
+    if (!(await ensureProfileUnlocked(shadow))) return;
     autoFillPageForms(state.privateProfile);
   });
 
@@ -2072,6 +2157,7 @@ function render(shadow: ShadowRoot): void {
 
   shadow.querySelector('.le-btn-copy-sig')?.addEventListener('click', async () => {
     if (!state.signatureDataUrl) return;
+    if (!(await ensureProfileUnlocked(shadow))) return;
     try {
       const res = await fetch(state.signatureDataUrl);
       const blob = await res.blob();
@@ -2439,8 +2525,114 @@ function navigateToSectionInDom(sectionQuery: string): string | null {
   return (targetEl.innerText || '').trim().slice(0, 4000);
 }
 
+let isProfileUnlocked = false;
+
+async function hashPin(pin: string): Promise<string> {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(pin));
+  return Array.from(new Uint8Array(buf))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+async function verifyOrSetupProfileLock(): Promise<boolean> {
+  try {
+    const stored = await chrome.storage?.local?.get(['legalease_profile_lock']);
+    const lock = stored?.legalease_profile_lock as { pinHash?: string; credentialId?: string } | undefined;
+
+    if (lock?.pinHash || lock?.credentialId) {
+      if (lock.credentialId && window.PublicKeyCredential && navigator.credentials?.get) {
+        try {
+          const rawId = Uint8Array.from(atob(lock.credentialId), (c) => c.charCodeAt(0));
+          const assertion = await navigator.credentials.get({
+            publicKey: {
+              challenge: crypto.getRandomValues(new Uint8Array(32)),
+              allowCredentials: [{ id: rawId, type: 'public-key' }],
+              userVerification: 'preferred',
+              timeout: 60000,
+            },
+          });
+          if (assertion) {
+            isProfileUnlocked = true;
+            return true;
+          }
+        } catch {
+          // Fall through to PIN prompt
+        }
+      }
+      if (lock.pinHash) {
+        const entered = window.prompt('Enter your Private Profile PIN / Password to unlock:');
+        if (!entered) return false;
+        const enteredHash = await hashPin(entered);
+        if (enteredHash === lock.pinHash) {
+          isProfileUnlocked = true;
+          return true;
+        }
+        return false;
+      }
+      return false;
+    }
+
+    const newPin = window.prompt('Set a PIN or Password to lock your Private Profile:');
+    if (!newPin || !newPin.trim()) return false;
+    const pinHash = await hashPin(newPin.trim());
+    let credentialId: string | undefined;
+
+    if (window.PublicKeyCredential && navigator.credentials?.create) {
+      const usePasskey = window.confirm('Also enable Device Passkey / Biometrics for quick unlock?');
+      if (usePasskey) {
+        try {
+          const cred = (await navigator.credentials.create({
+            publicKey: {
+              challenge: crypto.getRandomValues(new Uint8Array(32)),
+              rp: { name: 'LegalEase Private Profile' },
+              user: {
+                id: crypto.getRandomValues(new Uint8Array(16)),
+                name: 'legalease-user',
+                displayName: 'LegalEase User',
+              },
+              pubKeyCredParams: [{ alg: -7, type: 'public-key' }, { alg: -257, type: 'public-key' }],
+              authenticatorSelection: { authenticatorAttachment: 'platform', userVerification: 'preferred' },
+              timeout: 60000,
+            },
+          })) as PublicKeyCredential | null;
+          if (cred?.rawId) {
+            credentialId = btoa(String.fromCharCode(...new Uint8Array(cred.rawId)));
+          }
+        } catch {
+          // Passkey registration optional; PIN still saved
+        }
+      }
+    }
+
+    await chrome.storage?.local?.set({
+      legalease_profile_lock: credentialId ? { pinHash, credentialId } : { pinHash },
+    });
+    isProfileUnlocked = true;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function ensureProfileUnlocked(shadow: ShadowRoot): Promise<boolean> {
+  if (isProfileUnlocked) return true;
+  const ok = await verifyOrSetupProfileLock();
+  if (ok) {
+    render(shadow);
+    return true;
+  }
+  window.alert('Private Profile remains locked. Incorrect PIN/Password or unlock cancelled.');
+  return false;
+}
+
 function formatCompanionText(text: string): string {
-  return escapeHtml(text).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  let html = escapeHtml(text);
+  html = html.replace(/^\s*(?:\*{3,}|-{3,})\s*$/gm, '');
+  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  html = html.replace(/^\s*\*\s+/gm, '• ');
+  html = html.replace(/\*+/g, '');
+  html = html.replace(/\n{3,}/g, '\n\n').trim().replace(/\n/g, '<br>');
+  return html;
 }
 
 async function explainSelection(selectedText: string, followUpQuestion?: string): Promise<string> {
@@ -2510,6 +2702,26 @@ function updateDraftPositions(shadow: ShadowRoot): void {
   }
 
   if (!shell) return;
+
+  if (companionState.isActive) {
+    const activeSelEl = document.querySelector('.le-companion-active-sel');
+    let liveRect: DOMRect | null = null;
+    if (activeSelEl) {
+      liveRect = activeSelEl.getBoundingClientRect();
+    } else {
+      const sel = window.getSelection();
+      if (sel && sel.rangeCount > 0 && !sel.isCollapsed) {
+        liveRect = sel.getRangeAt(0).getBoundingClientRect();
+      }
+    }
+    if (liveRect && (liveRect.width > 0 || liveRect.height > 0)) {
+      companionState.anchorRect = {
+        left: liveRect.left,
+        top: liveRect.top,
+        bottom: liveRect.bottom,
+      };
+    }
+  }
 
   if (companionState.isActive && companionState.anchorRect) {
     shell.style.display = 'block';
@@ -2791,7 +3003,8 @@ function renderDraftLayer(shadow: ShadowRoot): void {
         void runCompanionPrompt(val);
       });
     });
-    layer.querySelector<HTMLButtonElement>('.le-companion-fill-details')?.addEventListener('click', () => {
+    layer.querySelector<HTMLButtonElement>('.le-companion-fill-details')?.addEventListener('click', async () => {
+      if (!(await ensureProfileUnlocked(shadow))) return;
       const source = companionState.draftText || companionState.selectedText;
       if (source) {
         companionState.draftText = fillPlaceholdersLocally(source, state.privateProfile);
@@ -2871,9 +3084,21 @@ function renderDraftLayer(shadow: ShadowRoot): void {
       </div>`
     : '';
 
+  const formPromptHtml = draftState.isFormFillPromptOpen
+    ? `<div class="le-draft-bar" role="dialog" aria-label="LegalEase Auto-Fill">
+        <div class="le-draft-row" style="justify-content:space-between;gap:8px;">
+          <span style="font-size:12px;color:#0b1f18;font-weight:500;">Auto-fill this form with your private profile?</span>
+          <div style="display:flex;gap:6px;flex-shrink:0;">
+            <button class="le-draft-insert le-form-fill-yes" type="button">Yes, Fill</button>
+            <button class="le-draft-recreate le-form-fill-no" type="button">No, Draft</button>
+          </div>
+        </div>
+      </div>`
+    : '';
+
   layer.innerHTML = `
-    <div class="le-draft-shell${draftState.isBarOpen ? ' expanded' : ''}">
-      ${draftState.isBarOpen ? barHtml : `<button class="le-draft-pill" type="button" title="Draft with LegalEase (Ctrl+J)"><img src="${escapeHtml(logoUrl)}" alt="LegalEase" draggable="false" /></button>`}
+    <div class="le-draft-shell${draftState.isBarOpen || draftState.isFormFillPromptOpen ? ' expanded' : ''}">
+      ${draftState.isFormFillPromptOpen ? formPromptHtml : draftState.isBarOpen ? barHtml : `<button class="le-draft-pill" type="button" title="Draft with LegalEase (Ctrl+J)"><img src="${escapeHtml(logoUrl)}" alt="LegalEase" draggable="false" /></button>`}
     </div>
   `;
 
@@ -2931,11 +3156,31 @@ function renderDraftLayer(shadow: ShadowRoot): void {
         suppressNextClick = false;
         return;
       }
+      if (state.settings.privateProfileEnabled && hasFillablePageForms() && !draftState.isBarOpen && !draftState.draftText) {
+        draftState.isFormFillPromptOpen = true;
+        renderDraftLayer(shadow);
+        return;
+      }
       draftState.isBarOpen = true;
       renderDraftLayer(shadow);
       layer.querySelector<HTMLTextAreaElement>('.le-draft-input')?.focus();
     });
   }
+
+  layer.querySelector<HTMLButtonElement>('.le-form-fill-yes')?.addEventListener('click', async () => {
+    if (!(await ensureProfileUnlocked(shadow))) return;
+    autoFillPageForms(state.privateProfile);
+    draftState.isFormFillPromptOpen = false;
+    draftState.pillVisible = false;
+    renderDraftLayer(shadow);
+  });
+
+  layer.querySelector<HTMLButtonElement>('.le-form-fill-no')?.addEventListener('click', () => {
+    draftState.isFormFillPromptOpen = false;
+    draftState.isBarOpen = true;
+    renderDraftLayer(shadow);
+    layer.querySelector<HTMLTextAreaElement>('.le-draft-input')?.focus();
+  });
 
   const input = layer.querySelector<HTMLTextAreaElement>('.le-draft-input');
   const submitBtn = layer.querySelector<HTMLButtonElement>('.le-draft-submit');
@@ -3002,7 +3247,8 @@ function renderDraftLayer(shadow: ShadowRoot): void {
     });
   });
 
-  layer.querySelector<HTMLButtonElement>('.le-draft-fill-details')?.addEventListener('click', () => {
+  layer.querySelector<HTMLButtonElement>('.le-draft-fill-details')?.addEventListener('click', async () => {
+    if (!(await ensureProfileUnlocked(shadow))) return;
     if (draftState.draftText) {
       draftState.draftText = fillPlaceholdersLocally(draftState.draftText, state.privateProfile);
       renderDraftLayer(shadow);
@@ -3040,12 +3286,13 @@ function init(): void {
   render(shadow);
 
   document.addEventListener('focusin', (e: FocusEvent) => {
-    if (!state.settings.autoScan) return;
     const el = getEditableElement(e.target);
     if (!el) return;
     draftState.targetEl = el;
     draftState.pillVisible = true;
     renderDraftLayer(shadow);
+    updateDraftPositions(shadow);
+    if (!state.settings.autoScan) return;
     const text = getEditableText(el);
     if (!isLikelyLegalText(text)) return;
     state.isEditableContext = true;
@@ -3146,6 +3393,18 @@ function init(): void {
       if (state.isOpen) {
         state.isOpen = false;
         render(shadow);
+        if (state.settings.privateProfileEnabled && !companionState.isActive) {
+          const sel = window.getSelection();
+          if (!sel || sel.toString().trim().length === 0) {
+            const fields = getFillablePageFields();
+            if (fields.length > 0) {
+              draftState.targetEl = fields[0];
+              draftState.pillVisible = true;
+              draftState.pillOffset = null;
+              renderDraftLayer(shadow);
+            }
+          }
+        }
       }
       renderDraftLayer(shadow);
     }, 180);
@@ -3183,6 +3442,18 @@ function init(): void {
             return;
           }
           render(shadow);
+        if (state.settings.privateProfileEnabled && !companionState.isActive) {
+          const sel = window.getSelection();
+          if (!sel || sel.toString().trim().length === 0) {
+            const fields = getFillablePageFields();
+            if (fields.length > 0) {
+              draftState.targetEl = fields[0];
+              draftState.pillVisible = true;
+              draftState.pillOffset = null;
+              renderDraftLayer(shadow);
+            }
+          }
+        }
         }
       });
     }
@@ -3247,6 +3518,18 @@ function init(): void {
           };
         }
         render(shadow);
+        if (state.settings.privateProfileEnabled && !companionState.isActive) {
+          const sel = window.getSelection();
+          if (!sel || sel.toString().trim().length === 0) {
+            const fields = getFillablePageFields();
+            if (fields.length > 0) {
+              draftState.targetEl = fields[0];
+              draftState.pillVisible = true;
+              draftState.pillOffset = null;
+              renderDraftLayer(shadow);
+            }
+          }
+        }
         if (isLegalPage() && state.settings.autoScan) {
           runLocalScan(shadow);
         }
