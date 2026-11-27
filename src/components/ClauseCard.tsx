@@ -108,6 +108,7 @@ export function ClauseCard({
         role="button"
         tabIndex={0}
         aria-expanded={expanded}
+        data-tooltip={expanded ? undefined : 'Click to view full explanation & suggested fix'}
         onClick={toggleExpand}
         onKeyDown={(e) => {
           if (e.key === 'Enter' || e.key === ' ') {

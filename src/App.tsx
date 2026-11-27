@@ -1573,6 +1573,7 @@ export function App() {
                       <button
                         type="button"
                         className="privacy-indicator privacy-indicator-btn"
+                        data-tooltip="Inspect personal details hidden locally before AI review"
                         onClick={() => setPrivacyDrawerOpen(true)}
                       >
                         Proof of Privacy ({report.redaction.totalMasked}) ↗
@@ -1774,7 +1775,7 @@ export function App() {
                                 pendingCount > 0 && (
                                   <button
                                     type="button"
-                                    className="ghost-btn compact"
+                                    className="btn-accept-all"
                                     onClick={handleAcceptAll}
                                   >
                                     Accept All ({pendingCount})

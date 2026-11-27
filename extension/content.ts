@@ -96,6 +96,16 @@ const state: ContentState = {
   }
 };
 
+let hasScannedCurrentContext = false;
+let lastContextUrl = window.location.href;
+
+function syncContextUrl(): void {
+  if (window.location.href !== lastContextUrl) {
+    lastContextUrl = window.location.href;
+    hasScannedCurrentContext = false;
+  }
+}
+
 function escapeHtml(value: string): string {
   return value
     .replace(/&/g, '&amp;')
@@ -283,6 +293,8 @@ function highlightClauseInDom(
 }
 
 function runLocalScan(shadow: ShadowRoot, sourceText?: string): void {
+  syncContextUrl();
+  hasScannedCurrentContext = true;
   state.isScanning = true;
   state.error = null;
   if (sourceText === undefined) {
@@ -380,6 +392,10 @@ function getShadowStyles(): string {
 .le-fab:hover {
   transform: scale(1.06);
   box-shadow: 0 10px 28px rgba(11, 79, 58, 0.28);
+}
+.le-fab.is-scanning {
+  border-color: #1D4ED8;
+  box-shadow: 0 0 0 4px rgba(29, 78, 216, 0.18), 0 8px 24px rgba(17, 17, 17, 0.18);
 }
 .le-fab img {
   width: calc(100% - 14px);
@@ -738,6 +754,29 @@ function getShadowStyles(): string {
   color: #374151;
   font-size: 0.92em;
 }
+[data-tooltip] {
+  position: relative;
+}
+[data-tooltip]:hover::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  max-width: 240px;
+  width: max-content;
+  background: #FFFFFF;
+  border: 1px solid #E4E2DC;
+  color: #111111;
+  border-radius: 8px;
+  box-shadow: 0 6px 18px rgba(17, 17, 17, 0.12);
+  padding: 6px 10px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.35;
+  z-index: 20;
+  pointer-events: none;
+  white-space: normal;
+}
 .le-card-body p {
   margin: 8px 0 0;
 }
@@ -838,12 +877,14 @@ function render(shadow: ShadowRoot): void {
     wasDrawerOpen = false;
     shadow.innerHTML = `
       <style>${getShadowStyles()}</style>
-      <button class="le-fab" type="button" title="Open LegalEase Audit" style="${getFabStyle(state.badgePos)}">
+      <button class="le-fab${state.isScanning ? ' is-scanning' : ''}" type="button" title="Open LegalEase Audit" style="${getFabStyle(state.badgePos)}">
         <img src="${escapeHtml(logoUrl)}" alt="LegalEase" draggable="false" />
         ${
-          flagCount > 0
-            ? `<span class="le-badge ${riskScore >= 60 ? 'is-high' : ''}">${flagCount}</span>`
-            : ''
+          state.isScanning
+            ? '<span class="le-badge">…</span>'
+            : flagCount > 0
+              ? `<span class="le-badge ${riskScore >= 60 ? 'is-high' : ''}">${flagCount}</span>`
+              : ''
         }
       </button>
     `;
@@ -923,6 +964,13 @@ function render(shadow: ShadowRoot): void {
           suppressNextClick = false;
           return;
         }
+        syncContextUrl();
+        if (!state.settings.autoScan && !hasScannedCurrentContext) {
+          if (!state.isScanning) {
+            runLocalScan(shadow);
+          }
+          return;
+        }
         state.isOpen = true;
         if (!state.hasScanned && !state.isScanning) {
           runLocalScan(shadow);
@@ -942,7 +990,7 @@ function render(shadow: ShadowRoot): void {
             const sevColor = getSeverityColor(clause.severity);
             return `
               <div class="le-card" data-card-id="${escapeHtml(clause.id)}">
-                <button class="le-card-head" type="button" data-toggle-id="${escapeHtml(clause.id)}">
+                <button class="le-card-head" type="button" data-toggle-id="${escapeHtml(clause.id)}"${!expanded ? ' data-tooltip="Click to view full explanation &amp; fix"' : ''}>
                   <span class="le-card-title">${escapeHtml(clause.title)}</span>
                   <span class="le-sev" style="background:${sevColor};">${escapeHtml(getSeverityLabel(clause.severity))}</span>
                 </button>
@@ -1058,15 +1106,15 @@ function render(shadow: ShadowRoot): void {
         <label class="le-field-label" for="le-custom-terms">AI &amp; Privacy: Custom Redaction Terms</label>
         <input class="le-input" id="le-custom-terms" type="text" placeholder="e.g. Acme Corp, John Doe" value="${escapeHtml(state.settings.customRedactionTerms)}" />
       </div>
-      <label class="le-toggle-row">
-        <span>Auto-scan legal pages</span>
+      <label class="le-toggle-row" data-tooltip="Automatically scans pages and textboxes for legal risks">
+        <span>Auto-scan pages &amp; sites</span>
         <input id="le-auto-scan" type="checkbox" ${state.settings.autoScan ? 'checked' : ''} />
       </label>
-      <label class="le-toggle-row" title="Uses on-device AI to hide person names, company names, and codenames before any cloud call">
+      <label class="le-toggle-row" data-tooltip="Uses on-device AI to hide person names, company names, and codenames before any cloud call">
         <span>Hide names &amp; companies locally</span>
         <input id="le-semantic-pii" type="checkbox" ${state.settings.enableSemanticPii ? 'checked' : ''} />
       </label>
-      <label class="le-toggle-row">
+      <label class="le-toggle-row" data-tooltip="Simulates AI analysis locally using offline rules without network calls">
         <span>Sandbox Mode</span>
         <input id="le-sandbox-mode" type="checkbox" ${state.settings.sandboxMode ? 'checked' : ''} />
       </label>

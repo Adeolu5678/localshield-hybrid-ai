@@ -809,27 +809,83 @@ header .status-pill,
 .filter-row {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  flex-wrap: wrap;
+  justify-content: flex-start;
+  gap: 8px;
+  flex-wrap: nowrap;
+  overflow-x: auto;
   margin-bottom: 14px;
+}
+
+.btn-accept-all {
+  background: #0B4F3A;
+  color: #FFFFFF;
+  border: none;
+  border-radius: 999px;
+  padding: 5px 12px;
+  font-size: 0.76rem;
+  font-weight: 600;
+  white-space: nowrap;
+  flex-shrink: 0;
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+
+.btn-accept-all:hover {
+  opacity: 0.9;
 }
 
 .filter-pills {
   display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
+  gap: 5px;
+  flex-wrap: nowrap;
 }
 
 .filter-pill {
-  padding: 4px 10px;
+  padding: 4px 9px;
   border-radius: 999px;
   border: 1px solid var(--border);
   background: var(--surface);
   color: var(--muted);
-  font-size: 0.75rem;
+  font-size: 0.72rem;
   font-weight: 500;
+  white-space: nowrap;
   cursor: pointer;
+}
+
+/* Branded LegalEase Hover Tooltips */
+[data-tooltip] {
+  position: relative;
+}
+
+[data-tooltip]::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: #FFFFFF;
+  border: 1px solid #E4E2DC;
+  color: #111111;
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+  padding: 6px 10px;
+  font-size: 0.74rem;
+  font-weight: 400;
+  line-height: 1.35;
+  white-space: normal;
+  width: max-content;
+  max-width: 240px;
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.15s ease, visibility 0.15s ease;
+  z-index: 100;
+}
+
+[data-tooltip]:hover::after,
+[data-tooltip]:focus-visible::after {
+  opacity: 1;
+  visibility: visible;
 }
 
 .filter-pill.active {

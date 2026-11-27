@@ -70,7 +70,7 @@ export function ContractDiffView({
         <div className="vault-actions-row">
           <label
             className="checkbox-field"
-            title="Replaces hidden placeholders like [EMAIL_1] with your real info on this device"
+            data-tooltip="Replaces hidden placeholders like [EMAIL_1] with your real info on this device"
           >
             <input
               type="checkbox"
